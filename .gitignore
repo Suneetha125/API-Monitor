@@ -1,0 +1,26 @@
+node_modules/
+dist/
+**/node_modules/
+**/dist/
+
+# Local database files and SQLite sidecars
+*.sqlite
+*.sqlite-*
+*.db
+
+# Local environment files (sample templates may be committed)
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Local credentials and private keys
+.npmrc
+credentials/
+**/credentials/
+secrets/
+**/secrets/
+*.pem
+*.key

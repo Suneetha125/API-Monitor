@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: pulsecheck
+    runtime: node
+    plan: starter
+    region: oregon
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    disk:
+      name: pulsecheck-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 24.12.0
+      - key: PORT
+        value: 10000
+      - key: DATABASE_PATH
+        value: /var/data/pulsecheck.sqlite
