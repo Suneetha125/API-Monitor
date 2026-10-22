@@ -2,6 +2,19 @@
 
 PulseCheck is a local developer dashboard for managing API monitors, executing on-demand HTTP health checks, and exploring controlled incident scenarios. Local development and tests use SQLite; production can use PostgreSQL through `DATABASE_URL`. Dashboard metrics are calculated from stored checks, not generated sample values.
 
+## Live demo
+
+- [Open the PulseCheck dashboard](https://pulsecheck-5su5.onrender.com/)
+- [Check API health](https://pulsecheck-5su5.onrender.com/api/health)
+
+The demo runs on Render's Free service and may take a little longer to respond after periods of inactivity.
+
+### Screenshots
+
+![PulseCheck dashboard showing metrics, latency history, and monitored simulation endpoints](docs/screenshots/dashboard.png)
+
+![PulseCheck incident summary, local simulation lab, and recent test runs](docs/screenshots/simulation-lab.png)
+
 ## Requirements
 
 - Node.js 22.5 or newer (uses the built-in `node:sqlite` module)
