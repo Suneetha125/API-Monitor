@@ -58,35 +58,53 @@ export function createApp({ db = createDatabase(), simulations = SIMULATIONS } =
     return res.json({ status: 'ok', simulation: key });
   });
 
-  app.get('/api/endpoints', (_req, res) => {
-    const endpoints = db.prepare(`
+  app.get('/api/endpoints', async (_req, res, next) => {
+    try {
+      const endpoints = await db.all(`
       SELECT e.id, e.name, e.url, e.simulation, e.created_at,
         COUNT(c.id) AS request_count,
-        COALESCE(SUM(c.success), 0) AS success_count,
-        ROUND(AVG(c.duration_ms), 1) AS average_latency_ms,
-        COALESCE(SUM(CASE WHEN c.success = 0 THEN 1 ELSE 0 END), 0) AS error_count,
+        COALESCE(SUM(CASE WHEN c.success THEN 1 ELSE 0 END), 0) AS success_count,
+        AVG(c.duration_ms) AS average_latency_ms,
+        COALESCE(SUM(CASE WHEN c.success THEN 0 ELSE 1 END), 0) AS error_count,
         MAX(c.checked_at) AS last_checked_at,
         (SELECT latest.success FROM checks latest
           WHERE latest.endpoint_id = e.id
           ORDER BY latest.checked_at DESC, latest.id DESC LIMIT 1) AS last_success
       FROM endpoints e LEFT JOIN checks c ON c.endpoint_id = e.id
       GROUP BY e.id ORDER BY e.id
-    `).all();
-    res.json(endpoints.map((endpoint) => ({
-      ...endpoint,
-      success_rate: endpoint.request_count
-        ? Number(((endpoint.success_count / endpoint.request_count) * 100).toFixed(1))
-        : null
-    })));
+      `);
+      res.json(endpoints.map((endpoint) => {
+        const requestCount = Number(endpoint.request_count);
+        const successCount = Number(endpoint.success_count);
+        return {
+          ...endpoint,
+          request_count: requestCount,
+          success_count: successCount,
+          average_latency_ms: endpoint.average_latency_ms == null
+            ? null
+            : Math.round(Number(endpoint.average_latency_ms) * 10) / 10,
+          error_count: Number(endpoint.error_count),
+          last_success: endpoint.last_success == null ? null : Number(Boolean(endpoint.last_success)),
+          success_rate: requestCount
+            ? Number(((successCount / requestCount) * 100).toFixed(1))
+            : null
+        };
+      }));
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.post('/api/endpoints', async (req, res, next) => {
     try {
       const endpoint = await validateEndpointInput(req.body);
-      const result = db.prepare(
-        'INSERT INTO endpoints (name, url, simulation) VALUES (?, ?, ?)'
-      ).run(endpoint.name, endpoint.url, endpoint.simulation);
-      res.status(201).json(db.prepare('SELECT * FROM endpoints WHERE id = ?').get(result.lastInsertRowid));
+      const id = await db.insert(
+        'INSERT INTO endpoints (name, url, simulation) VALUES (?, ?, ?)',
+        endpoint.name,
+        endpoint.url,
+        endpoint.simulation
+      );
+      res.status(201).json(await db.get('SELECT * FROM endpoints WHERE id = ?', id));
     } catch (error) {
       next(error);
     }
@@ -96,79 +114,105 @@ export function createApp({ db = createDatabase(), simulations = SIMULATIONS } =
     try {
       const id = Number(req.params.id);
       if (!Number.isInteger(id) || id < 1) throw new InputError('Endpoint id must be a positive integer.');
-      if (!db.prepare('SELECT id FROM endpoints WHERE id = ?').get(id)) {
+      if (!await db.get('SELECT id FROM endpoints WHERE id = ?', id)) {
         return res.status(404).json({ error: 'Endpoint not found.' });
       }
       const endpoint = await validateEndpointInput(req.body);
-      db.prepare('UPDATE endpoints SET name = ?, url = ?, simulation = ? WHERE id = ?')
-        .run(endpoint.name, endpoint.url, endpoint.simulation, id);
-      res.json(db.prepare('SELECT * FROM endpoints WHERE id = ?').get(id));
+      await db.run(
+        'UPDATE endpoints SET name = ?, url = ?, simulation = ? WHERE id = ?',
+        endpoint.name,
+        endpoint.url,
+        endpoint.simulation,
+        id
+      );
+      res.json(await db.get('SELECT * FROM endpoints WHERE id = ?', id));
     } catch (error) {
       next(error);
     }
   });
 
-  app.delete('/api/endpoints/:id', (req, res) => {
-    const id = Number(req.params.id);
-    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'Endpoint id must be a positive integer.' });
-    const result = db.prepare('DELETE FROM endpoints WHERE id = ?').run(id);
-    if (result.changes === 0) return res.status(404).json({ error: 'Endpoint not found.' });
-    res.status(204).end();
+  app.delete('/api/endpoints/:id', async (req, res, next) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id < 1) throw new InputError('Endpoint id must be a positive integer.');
+      const result = await db.run('DELETE FROM endpoints WHERE id = ?', id);
+      if (db.dialect === 'sqlite' && result.changes === 0) {
+        return res.status(404).json({ error: 'Endpoint not found.' });
+      }
+      if (db.dialect === 'postgres' && result.rowCount === 0) {
+        return res.status(404).json({ error: 'Endpoint not found.' });
+      }
+      res.status(204).end();
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.post('/api/endpoints/:id/check', async (req, res, next) => {
     try {
       const id = Number(req.params.id);
       if (!Number.isInteger(id) || id < 1) throw new InputError('Endpoint id must be a positive integer.');
-      const endpoint = db.prepare('SELECT * FROM endpoints WHERE id = ?').get(id);
+      const endpoint = await db.get('SELECT * FROM endpoints WHERE id = ?', id);
       if (!endpoint) return res.status(404).json({ error: 'Endpoint not found.' });
       const result = await runHealthCheck(endpoint, req.socket.localPort);
-      const check = db.prepare(`
+      const checkId = await db.insert(`
         INSERT INTO checks (endpoint_id, status_code, duration_ms, success, error, checked_at)
         VALUES (?, ?, ?, ?, ?, ?)
-      `).run(id, result.statusCode, result.durationMs, Number(result.success), result.error, new Date().toISOString());
-      res.status(201).json(db.prepare(`
+      `, id, result.statusCode, result.durationMs,
+      db.dialect === 'postgres' ? Boolean(result.success) : Number(result.success),
+      result.error, new Date().toISOString());
+      const check = await db.get(`
         SELECT c.id, c.endpoint_id, e.name AS endpoint_name, c.status_code, c.duration_ms,
           c.success, c.error, c.checked_at
         FROM checks c JOIN endpoints e ON e.id = c.endpoint_id WHERE c.id = ?
-      `).get(check.lastInsertRowid));
+      `, checkId);
+      res.status(201).json({ ...check, success: Number(Boolean(check.success)) });
     } catch (error) {
       next(error);
     }
   });
 
-  app.get('/api/checks', (req, res, next) => {
+  app.get('/api/checks', async (req, res, next) => {
     try {
       const filter = dateFilter(req.query);
       const limit = req.query.limit === undefined ? 200 : Number(req.query.limit);
       if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
         throw new InputError('limit must be an integer between 1 and 1000.');
       }
-      res.json(db.prepare(`
+      const checks = await db.all(`
         SELECT c.id, c.endpoint_id, e.name AS endpoint_name, c.status_code, c.duration_ms,
           c.success, c.error, c.checked_at
         FROM checks c JOIN endpoints e ON e.id = c.endpoint_id
         ${filter.where} ORDER BY c.checked_at DESC, c.id DESC LIMIT ?
-      `).all(...filter.values, limit));
+      `, ...filter.values, limit);
+      res.json(checks.map((check) => ({ ...check, success: Number(Boolean(check.success)) })));
     } catch (error) {
       next(error);
     }
   });
 
-  app.get('/api/dashboard', (req, res, next) => {
+  app.get('/api/dashboard', async (req, res, next) => {
     try {
       const filter = dateFilter(req.query);
-      const summary = db.prepare(`
+      const summary = await db.get(`
         SELECT COUNT(*) AS request_count,
-          COALESCE(SUM(c.success), 0) AS success_count,
-          ROUND(AVG(c.duration_ms), 1) AS average_latency_ms,
-          COALESCE(SUM(CASE WHEN c.success = 0 THEN 1 ELSE 0 END), 0) AS error_count
+          COALESCE(SUM(CASE WHEN c.success THEN 1 ELSE 0 END), 0) AS success_count,
+          AVG(c.duration_ms) AS average_latency_ms,
+          COALESCE(SUM(CASE WHEN c.success THEN 0 ELSE 1 END), 0) AS error_count
         FROM checks c ${filter.where}
-      `).get(...filter.values);
+      `, ...filter.values);
+      const requestCount = Number(summary.request_count);
+      const successCount = Number(summary.success_count);
       res.json({
         ...summary,
-        success_rate: summary.request_count
-          ? Number(((summary.success_count / summary.request_count) * 100).toFixed(1))
+        request_count: requestCount,
+        success_count: successCount,
+        average_latency_ms: summary.average_latency_ms == null
+          ? null
+          : Math.round(Number(summary.average_latency_ms) * 10) / 10,
+        error_count: Number(summary.error_count),
+        success_rate: requestCount
+          ? Number(((successCount / requestCount) * 100).toFixed(1))
           : null
       });
     } catch (error) {

@@ -1,6 +1,6 @@
 # PulseCheck — API Reliability & Incident Simulator
 
-PulseCheck is a local developer dashboard for managing API monitors, executing on-demand HTTP health checks, and exploring controlled incident scenarios. Request results are stored in SQLite; dashboard metrics are calculated from those stored checks, not generated sample values.
+PulseCheck is a local developer dashboard for managing API monitors, executing on-demand HTTP health checks, and exploring controlled incident scenarios. Local development and tests use SQLite; production can use PostgreSQL through `DATABASE_URL`. Dashboard metrics are calculated from stored checks, not generated sample values.
 
 ## Requirements
 
@@ -27,11 +27,13 @@ npm run build
 npm start
 ```
 
-In production (`NODE_ENV=production`), the API server also serves the built frontend from `frontend/dist` and listens on all interfaces. Set `PORT` to change the API port and `DATABASE_PATH` to change the SQLite file location. Without production mode, the API binds to `127.0.0.1`; during development Vite serves the frontend and proxies `/api` to the API.
+In production (`NODE_ENV=production`), the API server also serves the built frontend from `frontend/dist` and listens on all interfaces. Set `PORT` to change the API port. When `DATABASE_URL` is set, the server uses PostgreSQL; otherwise it uses SQLite at `DATABASE_PATH` (default `pulsecheck.sqlite`). Without production mode, the API binds to `127.0.0.1`; during development Vite serves the frontend and proxies `/api` to the API.
 
-### Render deployment
+### Free Render + Neon deployment
 
-The root `render.yaml` defines a single Node web service that builds the frontend, serves it from Express, and uses `/api/health` as its health check. Its SQLite database is stored on a persistent disk mounted at `/var/data`. Render persistent disks require a paid service plan; review Render's current pricing and approve any charges before creating the Blueprint. The service requires no API keys or other application secrets.
+The root `render.yaml` defines a single Free Node web service that builds and serves the frontend through Express and uses `/api/health` as its health check. For persistent production data, provide a Neon PostgreSQL connection URL through Render's `DATABASE_URL` environment variable. Do not commit the URL. The server uses PostgreSQL when that variable is configured and SQLite for local development/tests. It refuses to start in production without `DATABASE_URL`.
+
+Render Free web services have ephemeral local filesystems and can sleep when idle, so the local SQLite database is not used on the hosted service. Neon Free currently provides 1 GB/project and 100 CU-hours/project/month; it scales to zero after five minutes. Render's free service also has usage limits and cold starts. Review the [Render Free limits](https://render.com/docs/free) and [Neon Free plan](https://neon.com/docs/introduction/plans), keep both services on their Free plans, and do not attach a Render disk.
 
 ## Architecture
 
@@ -39,7 +41,7 @@ The root `render.yaml` defines a single Node web service that builds the fronten
 - `backend/src/app.js` — Express API routes, validation integration, and metric queries.
 - `backend/src/security.js` — endpoint input validation and public-address/DNS checks.
 - `backend/src/monitor.js` — timed HTTP requests and result normalization.
-- `backend/src/database.js` — built-in Node SQLite schema, indexes, and initial simulation endpoint records.
+- `backend/src/database.js` — local SQLite and production PostgreSQL adapters, schemas, indexes, and initial simulation endpoint records.
 - `backend/tests/` — Vitest and Supertest API integration tests.
 
 The backend is bound to the IPv4 loopback interface by default. Simulation targets are represented by `simulation://` identifiers in the endpoint registry and are translated by the backend to its own loopback HTTP simulation routes. The mock routes are never arbitrary proxy destinations.
@@ -77,9 +79,10 @@ Endpoint JSON uses `{ "name": "API name", "url": "https://example.com/health" }`
 
 - `endpoints`: `id`, `name`, `url`, nullable `simulation`, `created_at`.
 - `checks`: `id`, `endpoint_id` (foreign key with cascade delete), nullable `status_code`, `duration_ms`, `success`, nullable `error`, `checked_at`.
-- Indexes support endpoint/date history queries. SQLite foreign-key enforcement and WAL journaling are enabled.
+- `app_metadata`: PostgreSQL seed marker so an intentionally emptied endpoint list is not reseeded after service restarts.
+- Indexes support endpoint/date history queries. SQLite local databases enable foreign-key enforcement and WAL journaling; the production PostgreSQL database uses matching tables and cascading foreign keys.
 
-The default database file is `pulsecheck.sqlite` in the backend process working directory. It is ignored by Git.
+Without `DATABASE_URL`, the default local database file is `pulsecheck.sqlite` in the backend process working directory. It is ignored by Git. Production mode requires `DATABASE_URL` and fails fast rather than silently using ephemeral SQLite storage.
 
 ## Tests
 
@@ -87,7 +90,7 @@ The default database file is `pulsecheck.sqlite` in the backend process working 
 npm test
 ```
 
-The integration tests use an isolated temporary on-disk SQLite database per test and local simulation endpoints, without internet access. They cover API health, endpoint creation/retrieval and validation, success and HTTP 500 checks, timeout responsiveness, check persistence/history, exact success-rate and average-latency calculations, endpoint CRUD, and date filtering. There is no incident state or incident-resolution feature; failed checks are displayed as recent incidents, so consecutive-failure lifecycle tests do not apply.
+The integration tests use isolated temporary SQLite files and an in-memory PostgreSQL emulator, plus local simulation endpoints; they do not require internet access. They cover API health, endpoint creation/retrieval and validation, success and HTTP 500 checks, timeout responsiveness, check persistence/history, exact success-rate and average-latency calculations, endpoint CRUD, and date filtering. The PostgreSQL adapter is also exercised through API operations. There is no incident state or incident-resolution feature; failed checks are displayed as recent incidents, so consecutive-failure lifecycle tests do not apply.
 
 ## Known limitations
 
