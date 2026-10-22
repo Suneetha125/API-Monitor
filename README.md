@@ -31,7 +31,7 @@ In production (`NODE_ENV=production`), the API server also serves the built fron
 
 ### Free Render + Neon deployment
 
-The root `render.yaml` defines a single Free Node web service that builds and serves the frontend through Express and uses `/api/health` as its health check. For persistent production data, provide a Neon PostgreSQL connection URL through Render's `DATABASE_URL` environment variable. Do not commit the URL. The server uses PostgreSQL when that variable is configured and SQLite for local development/tests. It refuses to start in production without `DATABASE_URL`.
+The root `render.yaml` defines a single Free Node web service that installs development dependencies for the Vite build (`npm ci --include=dev`), builds and serves the frontend through Express, and uses `/api/health` as its health check. For persistent production data, provide a Neon PostgreSQL connection URL through Render's `DATABASE_URL` environment variable. Do not commit the URL. The server uses PostgreSQL when that variable is configured and SQLite for local development/tests. It refuses to start in production without `DATABASE_URL`.
 
 Render Free web services have ephemeral local filesystems and can sleep when idle, so the local SQLite database is not used on the hosted service. Neon Free currently provides 1 GB/project and 100 CU-hours/project/month; it scales to zero after five minutes. Render's free service also has usage limits and cold starts. Review the [Render Free limits](https://render.com/docs/free) and [Neon Free plan](https://neon.com/docs/introduction/plans), keep both services on their Free plans, and do not attach a Render disk.
 
