@@ -54,10 +54,41 @@ Render Free web services have ephemeral local filesystems and can sleep when idl
 - `backend/src/app.js` — Express API routes, validation integration, and metric queries.
 - `backend/src/security.js` — endpoint input validation and public-address/DNS checks.
 - `backend/src/monitor.js` — timed HTTP requests and result normalization.
+- `backend/src/services.js` — shared monitoring, history, summary, and simulation operations used by both the HTTP API and agent tools.
+- `backend/src/agent-tools.js` — provider-neutral tool definitions and validated tool handlers; no LLM SDK or agent loop.
 - `backend/src/database.js` — local SQLite and production PostgreSQL adapters, schemas, indexes, and initial simulation endpoint records.
 - `backend/tests/` — Vitest and Supertest API integration tests.
 
 The backend is bound to the IPv4 loopback interface by default. Simulation targets are represented by `simulation://` identifiers in the endpoint registry and are translated by the backend to its own loopback HTTP simulation routes. The mock routes are never arbitrary proxy destinations.
+
+## Agent tool layer
+
+The backend exports eight provider-neutral tools from `backend/src/agent-tools.js`. Create a tool instance with the existing database adapter and the listening server port (needed for local simulation checks):
+
+```js
+import { createAgentTools } from './src/agent-tools.js';
+import { createDatabase } from './src/database.js';
+
+const db = createDatabase();
+const tools = createAgentTools({ db, serverPort: 3001 });
+const result = await tools.get_service_health({});
+// { ok: true, data: { status: 'ok' } }
+```
+
+Each handler accepts a JSON-compatible argument object and returns `{ ok: true, data }` or `{ ok: false, error: { code, message } }`. `tools.definitions` provides names, descriptions, JSON input schemas, and effect metadata for a future tool-calling adapter. `get_service_health`, `list_monitors`, `get_check_history`, `get_monitoring_summary`, `get_recent_failures`, and `list_simulations` are read-only. `run_endpoint_check` performs and persists a check; `run_simulation` executes a built-in local scenario without persisting a check. Recent failures are filtered in the database query rather than fetched alongside successful runs.
+
+Example:
+
+```js
+const history = await tools.get_check_history({
+  endpointId: 1,
+  from: '2026-11-01',
+  to: '2026-11-04',
+  limit: 50
+});
+```
+
+The tool layer does not accept arbitrary SQL or URLs. A check can only target a monitor already in the database, and custom monitor URLs continue to use the existing public-address validation and DNS pinning. Tool handlers have no authentication of their own; keep them inside trusted server-side code and do not expose them directly to unauthenticated clients.
 
 ## Simulations
 
