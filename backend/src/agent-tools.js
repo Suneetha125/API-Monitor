@@ -2,11 +2,12 @@ import { SIMULATIONS } from './database.js';
 import { InputError } from './security.js';
 import {
   executeSimulation,
-  getCheckHistory,
+  getAgentCheckHistory,
   getMonitoringSummary,
   getServiceHealth,
   listMonitors,
   listSimulations,
+  projectCheckForAgent,
   runEndpointCheck
 } from './services.js';
 
@@ -161,7 +162,22 @@ function wrapTool(handler) {
   };
 }
 
-export function createAgentTools({ db, serverPort, simulations = SIMULATIONS } = {}) {
+function gateOperationalTool(tool, enabled) {
+  return async (args) => enabled
+    ? tool(args)
+    : {
+      ok: false,
+      error: { code: 'TOOL_NOT_ALLOWED', message: 'This tool is disabled by server policy.' }
+    };
+}
+
+export function createAgentTools({
+  db,
+  serverPort,
+  simulations = SIMULATIONS,
+  allowOperationalTools = false,
+  internalSimulationToken
+} = {}) {
   if (!db || typeof db.get !== 'function' || typeof db.all !== 'function') {
     throw new TypeError('An initialized database adapter is required.');
   }
@@ -176,17 +192,17 @@ export function createAgentTools({ db, serverPort, simulations = SIMULATIONS } =
     }),
     list_monitors: wrapTool(async (args) => {
       validateArguments(args, []);
-      return listMonitors(db);
+      return listMonitors(db, { includeUrl: false });
     }),
-    run_endpoint_check: wrapTool(async (args) => {
+    run_endpoint_check: gateOperationalTool(wrapTool(async (args) => {
       const input = validateArguments(args, ['endpointId'], ['endpointId']);
       validatePositiveInteger(input.endpointId, 'endpointId');
-      const result = await runEndpointCheck(db, input.endpointId, serverPort);
+      const result = await runEndpointCheck(db, input.endpointId, serverPort, { internalSimulationToken });
       if (!result) throw new NotFoundError('Endpoint not found.');
-      return { ...result, success: Boolean(result.success) };
-    }),
+      return { ...projectCheckForAgent(result), success: Boolean(result.success) };
+    }), allowOperationalTools),
     get_check_history: wrapTool(async (args) => (
-      getCheckHistory(db, validateFilterArguments(args, { includeLimit: true }))
+      getAgentCheckHistory(db, validateFilterArguments(args, { includeLimit: true }))
     )),
     get_monitoring_summary: wrapTool(async (args) => {
       const summary = await getMonitoringSummary(db, validateFilterArguments(args));
@@ -199,13 +215,13 @@ export function createAgentTools({ db, serverPort, simulations = SIMULATIONS } =
       };
     }),
     get_recent_failures: wrapTool(async (args) => (
-      getCheckHistory(db, validateFilterArguments(args, { includeLimit: true }), { failuresOnly: true })
+      getAgentCheckHistory(db, validateFilterArguments(args, { includeLimit: true }), { failuresOnly: true })
     )),
     list_simulations: wrapTool(async (args) => {
       validateArguments(args, []);
       return listSimulations(simulations);
     }),
-    run_simulation: wrapTool(async (args) => {
+    run_simulation: gateOperationalTool(wrapTool(async (args) => {
       const input = validateArguments(args, ['key'], ['key']);
       if (typeof input.key !== 'string') throw new InputError('key must be a string.');
       const result = await executeSimulation(input.key, simulations);
@@ -214,7 +230,7 @@ export function createAgentTools({ db, serverPort, simulations = SIMULATIONS } =
         success: result.statusCode >= 200 && result.statusCode < 300,
         body: result.body
       };
-    })
+    }), allowOperationalTools)
   };
 
   return {

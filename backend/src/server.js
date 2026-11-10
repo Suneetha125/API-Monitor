@@ -1,10 +1,12 @@
 import { createApp } from './app.js';
+import { assertClerkConfiguration } from './auth.js';
 import { createDatabase, createPostgresDatabase } from './database.js';
 import express from 'express';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const port = Number(process.env.PORT ?? 3001);
+assertClerkConfiguration();
 if (process.env.NODE_ENV === 'production' && !process.env.DATABASE_URL) {
   throw new Error('DATABASE_URL is required in production so monitoring data uses persistent storage.');
 }

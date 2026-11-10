@@ -3,6 +3,46 @@ import { InputError } from './security.js';
 import { runHealthCheck } from './monitor.js';
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_AGENT_ERROR_LENGTH = 500;
+
+function sanitizeAgentError(error) {
+  if (typeof error !== 'string') return null;
+  const sanitized = error
+    .replace(/\b(authorization)\s*[:=]\s*(?:(?:bearer|basic)\s+)?(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1=[REDACTED]')
+    .replace(/\b(?:bearer|basic)\s+(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '[REDACTED_AUTH]')
+    .replace(/\b(api\s*[_-]?\s*key|access\s*[_-]?\s*token|refresh\s*[_-]?\s*token|client\s*[_-]?\s*secret|x-amz-signature|signature|sig|key|secret|password|token|authorization)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1=[REDACTED]')
+    .replace(/https?:\/\/[^\s<>"']+/gi, (match) => {
+      const punctuation = match.match(/[),.;!?]+$/)?.[0] ?? '';
+      const candidate = punctuation ? match.slice(0, -punctuation.length) : match;
+      try {
+        const url = new URL(candidate);
+        url.username = '';
+        url.password = '';
+        url.search = '';
+        url.hash = '';
+        return `${url.toString()}${punctuation}`;
+      } catch {
+        return '[REDACTED_URL]';
+      }
+    })
+    .trim();
+  return sanitized.length <= MAX_AGENT_ERROR_LENGTH
+    ? sanitized
+    : `${sanitized.slice(0, MAX_AGENT_ERROR_LENGTH - 1)}…`;
+}
+
+export function projectCheckForAgent(check) {
+  return {
+    id: check.id,
+    endpoint_id: check.endpoint_id,
+    endpoint_name: check.endpoint_name,
+    status_code: check.status_code,
+    duration_ms: check.duration_ms,
+    success: Number(Boolean(check.success)),
+    error: sanitizeAgentError(check.error),
+    checked_at: check.checked_at
+  };
+}
 
 function isValidDate(value) {
   if (!ISO_DATE.test(value)) return false;
@@ -66,9 +106,9 @@ export async function getServiceHealth() {
   return { status: 'ok' };
 }
 
-export async function listMonitors(db) {
+export async function listMonitors(db, { includeUrl = true } = {}) {
   const endpoints = await db.all(`
-    SELECT e.id, e.name, e.url, e.simulation, e.created_at,
+    SELECT e.id, e.name, ${includeUrl ? 'e.url, ' : ''}e.simulation, e.created_at,
       COUNT(c.id) AS request_count,
       COALESCE(SUM(CASE WHEN c.success THEN 1 ELSE 0 END), 0) AS success_count,
       AVG(c.duration_ms) AS average_latency_ms,
@@ -99,17 +139,18 @@ export async function listMonitors(db) {
   });
 }
 
-export async function runEndpointCheck(db, idInput, serverPort) {
+export async function runEndpointCheck(db, idInput, serverPort, options = {}) {
   const id = positiveInteger(idInput, 'Endpoint id');
-  const endpoint = await db.get('SELECT * FROM endpoints WHERE id = ?', id);
+  const endpoint = await db.get('SELECT id, name, url, simulation FROM endpoints WHERE id = ?', id);
   if (!endpoint) return null;
-  const result = await runHealthCheck(endpoint, serverPort);
+  const result = await runHealthCheck(endpoint, serverPort, options);
+  const error = sanitizeAgentError(result.error);
   const checkId = await db.insert(`
     INSERT INTO checks (endpoint_id, status_code, duration_ms, success, error, checked_at)
     VALUES (?, ?, ?, ?, ?, ?)
   `, id, result.statusCode, result.durationMs,
   db.dialect === 'postgres' ? Boolean(result.success) : Number(result.success),
-  result.error, new Date().toISOString());
+  error, new Date().toISOString());
   const check = await db.get(`
     SELECT c.id, c.endpoint_id, e.name AS endpoint_name, c.status_code, c.duration_ms,
       c.success, c.error, c.checked_at
@@ -136,6 +177,11 @@ export async function getCheckHistory(db, input = {}, { failuresOnly = false } =
     ORDER BY c.checked_at DESC, c.id DESC LIMIT ?
   `, ...filter.values, limit);
   return checks.map((check) => ({ ...check, success: Number(Boolean(check.success)) }));
+}
+
+export async function getAgentCheckHistory(db, input = {}, options = {}) {
+  const checks = await getCheckHistory(db, input, options);
+  return checks.map(projectCheckForAgent);
 }
 
 export async function getMonitoringSummary(db, input = {}) {

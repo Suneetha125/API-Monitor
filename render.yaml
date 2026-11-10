@@ -14,3 +14,13 @@ services:
         value: 24.12.0
       - key: DATABASE_URL
         sync: false
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: CLERK_PUBLISHABLE_KEY
+        sync: false
+      - key: VITE_CLERK_PUBLISHABLE_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: AGENT_ALLOW_OPERATIONAL_TOOLS
+        value: "false"

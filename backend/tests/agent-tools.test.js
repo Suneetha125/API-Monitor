@@ -4,12 +4,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAgentTools } from '../src/agent-tools.js';
-import { createApp } from '../src/app.js';
 import { createDatabase } from '../src/database.js';
+import { createTestApp } from './test-app.js';
 
 let db;
 let tools;
 let server;
+let app;
 let temporaryDirectory;
 let queryLog;
 
@@ -28,9 +29,14 @@ beforeEach(async () => {
       return db.all(sql, ...params);
     }
   };
-  server = createServer(createApp({ db }));
+  app = createTestApp({ db });
+  server = createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  tools = createAgentTools({ db: trackedDb, serverPort: server.address().port });
+  tools = createAgentTools({
+    db: trackedDb,
+    serverPort: server.address().port,
+    internalSimulationToken: app.locals.internalSimulationToken
+  });
 });
 
 afterEach(async () => {
@@ -40,6 +46,7 @@ afterEach(async () => {
   db?.close();
   db = undefined;
   server = undefined;
+  app = undefined;
   if (temporaryDirectory) {
     rmSync(temporaryDirectory, { recursive: true, force: true });
     temporaryDirectory = undefined;
@@ -95,6 +102,8 @@ describe('agent tools', () => {
       last_success: 0,
       success_rate: 50
     });
+    expect(result.data.find((item) => item.id === id)).not.toHaveProperty('url');
+    expect(queryLog.at(-1)).not.toMatch(/e\.url/);
     await expect(tools.list_monitors(null)).resolves.toMatchObject({
       ok: false,
       error: { code: 'INVALID_ARGUMENT' }
@@ -102,7 +111,13 @@ describe('agent tools', () => {
   });
 
   it('runs and persists endpoint checks, including failed HTTP responses', async () => {
-    const successful = await tools.run_endpoint_check({ endpointId: endpointIdFor('normal') });
+    const enabledTools = createAgentTools({
+      db,
+      serverPort: server.address().port,
+      allowOperationalTools: true,
+      internalSimulationToken: app.locals.internalSimulationToken
+    });
+    const successful = await enabledTools.run_endpoint_check({ endpointId: endpointIdFor('normal') });
     expect(successful).toMatchObject({
       ok: true,
       data: { status_code: 200, success: true, error: null }
@@ -110,13 +125,13 @@ describe('agent tools', () => {
     expect(successful.data.duration_ms).toEqual(expect.any(Number));
     expect(successful.data.id).toEqual(expect.any(Number));
 
-    const failed = await tools.run_endpoint_check({ endpointId: endpointIdFor('error') });
+    const failed = await enabledTools.run_endpoint_check({ endpointId: endpointIdFor('error') });
     expect(failed).toMatchObject({
       ok: true,
       data: { status_code: 500, success: false, error: 'HTTP 500' }
     });
-    expect((await tools.run_endpoint_check({ endpointId: 0 })).error.code).toBe('INVALID_ARGUMENT');
-    expect(await tools.run_endpoint_check({ endpointId: 9999 })).toEqual({
+    expect((await enabledTools.run_endpoint_check({ endpointId: 0 })).error.code).toBe('INVALID_ARGUMENT');
+    expect(await enabledTools.run_endpoint_check({ endpointId: 9999 })).toEqual({
       ok: false,
       error: { code: 'NOT_FOUND', message: 'Endpoint not found.' }
     });
@@ -173,23 +188,58 @@ describe('agent tools', () => {
     expect((await tools.get_recent_failures({ limit: 0 })).error.code).toBe('INVALID_ARGUMENT');
   });
 
+  it('bounds and sanitizes agent-facing check errors while preserving status codes', async () => {
+    const id = endpointIdFor('error');
+    const error = 'HTTP 503 Authorization: Bearer header-secret at https://user:pass@example.com/health?sig=one&key=two&X-Amz-Signature=three#fragment; ' + 'detail '.repeat(100);
+    insertCheck(id, false, '2026-11-03T10:01:00.000Z', error);
+
+    const result = await tools.get_recent_failures({ endpointId: id });
+    const check = result.data[0];
+    expect(check).toMatchObject({ endpoint_id: id, status_code: 503, success: 0 });
+    expect(check.error.length).toBeLessThanOrEqual(500);
+    expect(check.error).toContain('HTTP 503');
+    expect(check.error).toContain('https://example.com/health');
+    for (const secret of ['header-secret', 'user:pass', 'sig=one', 'key=two', 'X-Amz-Signature=three', '#fragment']) {
+      expect(check.error).not.toContain(secret);
+    }
+    expect(check).not.toHaveProperty('url');
+  });
+
   it('lists and executes built-in simulations with structured outcomes', async () => {
     await expect(tools.list_simulations({})).resolves.toMatchObject({
       ok: true,
       data: expect.arrayContaining([expect.objectContaining({ key: 'normal' }), expect.objectContaining({ key: 'error' })])
     });
     expect((await tools.list_simulations({ unexpected: true })).error.code).toBe('INVALID_ARGUMENT');
+    const enabledTools = createAgentTools({
+      db,
+      serverPort: server.address().port,
+      allowOperationalTools: true
+    });
     const checksBefore = Number(db.get('SELECT COUNT(*) AS count FROM checks').count);
-    await expect(tools.run_simulation({ key: 'normal' })).resolves.toEqual({
+    await expect(enabledTools.run_simulation({ key: 'normal' })).resolves.toEqual({
       ok: true,
       data: { status_code: 200, success: true, body: { status: 'ok', simulation: 'normal' } }
     });
-    await expect(tools.run_simulation({ key: 'error' })).resolves.toEqual({
+    await expect(enabledTools.run_simulation({ key: 'error' })).resolves.toEqual({
       ok: true,
       data: { status_code: 500, success: false, body: { error: 'Simulated server error.' } }
     });
-    expect((await tools.run_simulation({ key: 'unknown' })).error.code).toBe('INVALID_ARGUMENT');
-    expect((await tools.run_simulation({ key: 12 })).error.code).toBe('INVALID_ARGUMENT');
+    expect((await enabledTools.run_simulation({ key: 'unknown' })).error.code).toBe('INVALID_ARGUMENT');
+    expect((await enabledTools.run_simulation({ key: 12 })).error.code).toBe('INVALID_ARGUMENT');
+    expect(Number(db.get('SELECT COUNT(*) AS count FROM checks').count)).toBe(checksBefore);
+  });
+
+  it('blocks direct operational handler calls unless server policy enables them', async () => {
+    const checksBefore = Number(db.get('SELECT COUNT(*) AS count FROM checks').count);
+    expect(await tools.run_endpoint_check({ endpointId: endpointIdFor('normal') })).toEqual({
+      ok: false,
+      error: { code: 'TOOL_NOT_ALLOWED', message: 'This tool is disabled by server policy.' }
+    });
+    expect(await tools.run_simulation({ key: 'normal' })).toEqual({
+      ok: false,
+      error: { code: 'TOOL_NOT_ALLOWED', message: 'This tool is disabled by server policy.' }
+    });
     expect(Number(db.get('SELECT COUNT(*) AS count FROM checks').count)).toBe(checksBefore);
   });
 
@@ -199,7 +249,8 @@ describe('agent tools', () => {
         get: () => { throw new Error('database connection detail'); },
         all: () => { throw new Error('database connection detail'); }
       },
-      serverPort: server.address().port
+      serverPort: server.address().port,
+      allowOperationalTools: true
     });
     await expect(failingTools.list_monitors({})).resolves.toEqual({
       ok: false,

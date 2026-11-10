@@ -9,8 +9,10 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@clerk/express": "^2.1.88",
     "express": "^4.21.2",
     "ipaddr.js": "^2.2.0",
+    "openai": "^7.53.0",
     "pg": "^8.23.1"
   },
   "devDependencies": {

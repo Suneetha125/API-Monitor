@@ -20,7 +20,7 @@ function isPublicAddress(address) {
   return ipaddr.isValid(address) && ipaddr.parse(address).range() === 'unicast';
 }
 
-async function request(urlText, pinnedAddress, started) {
+async function request(urlText, pinnedAddress, started, headers = {}) {
   const url = new URL(urlText);
   const transport = url.protocol === 'https:' ? https : http;
   return new Promise((resolve) => {
@@ -34,7 +34,7 @@ async function request(urlText, pinnedAddress, started) {
     };
     const req = transport.request(url, {
       method: 'GET',
-      headers: { accept: 'application/json', 'user-agent': 'PulseCheck/1.0' },
+      headers: { accept: 'application/json', 'user-agent': 'PulseCheck/1.0', ...headers },
       lookup: pinnedAddress ? lookupPinned(pinnedAddress) : undefined
     }, (response) => {
       response.resume();
@@ -73,13 +73,18 @@ async function request(urlText, pinnedAddress, started) {
   });
 }
 
-export async function runHealthCheck(endpoint, serverPort) {
+export async function runHealthCheck(endpoint, serverPort, { internalSimulationToken } = {}) {
   const started = performance.now();
   let targetUrl = endpoint.url;
   let pinnedAddress;
+  let requestHeaders;
   if (endpoint.simulation) {
     if (!SIMULATIONS.has(endpoint.simulation)) throw new InputError('Unsupported simulation.');
     targetUrl = `http://127.0.0.1:${serverPort}/api/simulations/${endpoint.simulation}`;
+    if (typeof internalSimulationToken !== 'string' || !internalSimulationToken) {
+      throw new InputError('Internal simulation authorization is not configured.');
+    }
+    requestHeaders = { 'x-pulsecheck-simulation-token': internalSimulationToken };
   } else {
     const url = new URL(endpoint.url);
     const hostname = url.hostname.replace(/^\[|\]$/g, '');
@@ -98,5 +103,5 @@ export async function runHealthCheck(endpoint, serverPort) {
     }
     pinnedAddress = addresses[0].address;
   }
-  return request(targetUrl, pinnedAddress, started);
+  return request(targetUrl, pinnedAddress, started, requestHeaders);
 }
