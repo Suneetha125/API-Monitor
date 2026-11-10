@@ -28,6 +28,7 @@ describe('Gemini OpenAI-compatible provider', () => {
   });
 
   it('initializes the OpenAI SDK with Gemini credentials and the documented endpoint', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
     const create = vi.fn(async () => ({
       choices: [{ message: { role: 'assistant', content: 'Gemini is ready.' } }]
     }));
@@ -56,6 +57,7 @@ describe('Gemini OpenAI-compatible provider', () => {
       tools: [],
       tool_choice: 'auto'
     });
+    expect(errorLog).not.toHaveBeenCalled();
   });
 
   it('preserves Gemini function calls in the agent response format', async () => {
@@ -184,11 +186,66 @@ describe('Gemini OpenAI-compatible provider', () => {
   });
 
   it('wraps upstream failures without exposing provider details', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const apiKey = 'gemini-test-key-do-not-log';
+    const privateUserData = 'customer@example.com';
+    const authorizationCredential = ['auth', 'secret'].join('-');
     class FailingOpenAI {
       constructor() {
         this.chat = {
           completions: {
-            create: async () => { throw new Error('private upstream details'); }
+            create: async () => {
+              const error = new Error(
+                `Request failed with key=${apiKey}; Authorization: Bearer ${authorizationCredential}; contact ${privateUserData}; {"error":"private response body"} ${'x'.repeat(700)}`
+              );
+              error.status = 429;
+              error.code = 'insufficient_quota';
+              error.type = 'api_error';
+              throw error;
+            }
+          }
+        };
+      }
+    }
+    const provider = createGeminiProvider({
+      apiKey,
+      OpenAIClient: FailingOpenAI
+    });
+
+    const messages = [{ role: 'user', content: `contact ${privateUserData}` }];
+    await expect(provider.complete({ messages, tools: [] }))
+      .rejects.toBeInstanceOf(LlmRequestError);
+    await expect(provider.complete({ messages, tools: [] }))
+      .rejects.toThrow('The language model request failed.');
+    expect(errorLog).toHaveBeenCalledTimes(2);
+    const [logMessage, diagnostics] = errorLog.mock.calls[0];
+    expect(logMessage).toBe('Gemini upstream request failed.');
+    expect(diagnostics).toMatchObject({
+      status: 429,
+      code: 'insufficient_quota',
+      type: 'api_error'
+    });
+    expect(diagnostics.message).toHaveLength(500);
+    const serializedLog = JSON.stringify(errorLog.mock.calls);
+    expect(serializedLog).not.toContain(apiKey);
+    expect(serializedLog).not.toContain(authorizationCredential);
+    expect(serializedLog).not.toContain(privateUserData);
+    expect(serializedLog).not.toContain('Authorization: Bearer');
+    expect(serializedLog).not.toContain('private response body');
+  });
+
+  it('keeps the investigation response generic for Gemini upstream failures', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    class FailingOpenAI {
+      constructor() {
+        this.chat = {
+          completions: {
+            create: async () => {
+              const error = new Error('401 {"error":{"message":"Gemini private response body"}}');
+              error.status = 401;
+              error.code = 'invalid_api_key';
+              throw error;
+            }
           }
         };
       }
@@ -197,10 +254,25 @@ describe('Gemini OpenAI-compatible provider', () => {
       apiKey: 'gemini-test-key',
       OpenAIClient: FailingOpenAI
     });
+    const db = createDatabase(':memory:');
 
-    await expect(provider.complete({ messages: [], tools: [] }))
-      .rejects.toBeInstanceOf(LlmRequestError);
-    await expect(provider.complete({ messages: [], tools: [] }))
-      .rejects.toThrow('The language model request failed.');
+    try {
+      const response = await request(createTestApp({ db, provider }))
+        .post('/api/agent/investigate')
+        .send({ question: 'Investigate the latest check.' })
+        .expect(502);
+      expect(response.body).toEqual({
+        success: false,
+        error: 'The investigation could not be completed. Please try again later.'
+      });
+      expect(JSON.stringify(response.body)).not.toContain('Gemini private response body');
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain('Gemini private response body');
+      expect(errorLog).toHaveBeenCalledWith(
+        'Gemini upstream request failed.',
+        expect.objectContaining({ status: 401, code: 'invalid_api_key' })
+      );
+    } finally {
+      db.close();
+    }
   });
 });
