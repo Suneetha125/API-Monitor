@@ -113,7 +113,7 @@ Authenticated users share the monitoring workspace and its endpoint/check data. 
 
 ### Configure and run
 
-Copy `.env.example` to `.env` for reference, then set `OPENAI_API_KEY` and, optionally, `OPENAI_MODEL` in the backend process environment or your deployment's secret configuration. This project does not load `.env` files automatically. `AGENT_MAX_ITERATIONS` defaults to 5 and accepts values from 1 through 10. `AGENT_ALLOW_OPERATIONAL_TOOLS` defaults to `false`; when enabled it permits the approval endpoint to execute the two operational tools, but it does not replace explicit per-operation approval.
+Copy `.env.example` to `.env` for reference, then set `LLM_PROVIDER` to `openai` (the default) or `gemini`. OpenAI uses `OPENAI_API_KEY` and optional `OPENAI_MODEL`; Gemini uses `GEMINI_API_KEY` and optional `GEMINI_MODEL` (defaults to `gemini-3.8-flash`). Configure only the selected provider's API key in the backend process environment or deployment secret settings. This project does not load `.env` files automatically. `AGENT_MAX_ITERATIONS` defaults to 5 and accepts values from 1 through 10. `AGENT_ALLOW_OPERATIONAL_TOOLS` defaults to `false`; when enabled it permits the approval endpoint to execute the two operational tools, but it does not replace explicit per-operation approval.
 
 Start the API with `npm run dev:api` (or `npm start` for production), then send a POST request:
 

@@ -26,6 +26,7 @@ import {
   SIMULATIONS
 } from './database.js';
 import { createOpenAIProvider, LlmRequestError, MissingApiKeyError } from './openai-provider.js';
+import { createGeminiProvider } from './gemini-provider.js';
 import { InputError, validateEndpointInput } from './security.js';
 import {
   executeSimulation,
@@ -52,6 +53,17 @@ function parsePagination(query, { defaultLimit = 20, maxLimit = 100 } = {}) {
 const APPROVAL_TTL_MS = 15 * 60 * 1000;
 const APPROVAL_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const APPROVABLE_OPERATIONAL_TOOLS = new Set(['run_endpoint_check', 'run_simulation']);
+
+export function createConfiguredProvider(providerName = process.env.LLM_PROVIDER) {
+  const selectedProvider = typeof providerName === 'string'
+    ? providerName.trim().toLowerCase()
+    : providerName;
+  if (selectedProvider === undefined || selectedProvider === 'openai') {
+    return createOpenAIProvider();
+  }
+  if (selectedProvider === 'gemini') return createGeminiProvider();
+  throw new TypeError('LLM_PROVIDER must be either "openai" or "gemini".');
+}
 
 function safeApprovalArguments(record) {
   if (record.toolName === 'run_endpoint_check') {
@@ -131,7 +143,7 @@ async function persistFailedInvestigation(db, ownerId, question, answerText) {
 export function createApp({
   db = createDatabase(),
   simulations = SIMULATIONS,
-  provider = createOpenAIProvider(),
+  provider = createConfiguredProvider(),
   maxAgentIterations = parseMaxIterations(),
   maxToolCallsPerResponse = parseMaxToolCallsPerResponse(),
   maxToolExecutions = parseMaxToolExecutions(),
