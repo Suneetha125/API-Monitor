@@ -462,6 +462,30 @@ export function createApp({
     }
   });
 
+  app.delete('/api/agent/investigations/:id', async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id < 1) {
+        return res.status(400).json({ success: false, error: 'id must be a positive integer.' });
+      }
+      const result = await db.run(
+        'DELETE FROM investigations WHERE id = ? AND owner_id = ?',
+        id,
+        req.authenticatedUserId
+      );
+      if (Number(result.changes ?? result.rowCount ?? 0) === 0) {
+        return res.status(404).json({ success: false, error: 'Investigation not found.' });
+      }
+      return res.status(204).end();
+    } catch {
+      console.error('Failed to delete investigation.');
+      return res.status(500).json({
+        success: false,
+        error: 'The investigation could not be deleted.'
+      });
+    }
+  });
+
   app.get('/api/simulations', (_req, res) => res.json(simulations));
   app.get('/api/simulations/:key', async (req, res, next) => {
     try {

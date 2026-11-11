@@ -13,9 +13,14 @@
 .investigation-history-panel{overflow:hidden}
 .history-loading{display:flex;align-items:center;justify-content:center;gap:9px;min-height:84px;color:#8d9ab0;font-size:10px}
 .investigation-history-list{padding:0 17px}
-.investigation-history-item{display:block;width:100%;padding:12px 10px;text-align:left;border:0;border-top:1px solid #283142;background:transparent;color:inherit;cursor:pointer}
+.investigation-history-row{display:flex;align-items:stretch;border-top:1px solid #283142}
+.investigation-history-item{display:block;flex:1;min-width:0;width:100%;padding:12px 10px;text-align:left;border:0;background:transparent;color:inherit;cursor:pointer}
 .investigation-history-item:hover,.investigation-history-item.selected{background:#1a2332}
 .investigation-history-item.selected{box-shadow:inset 2px 0 #8298ff}
+.history-delete-button{align-self:flex-start;display:grid;place-items:center;flex:none;margin:9px 5px 0 0;padding:6px;border:0;border-radius:5px;background:transparent;color:#738097;cursor:pointer}
+.history-delete-button:hover:not(:disabled){background:#3b222b;color:#ffb0b3}
+.history-delete-button:disabled{opacity:.55;cursor:wait}
+.history-success{display:flex;align-items:center;gap:8px;margin:0 17px 12px;padding:9px 10px;border:1px solid #315947;border-radius:6px;background:#1d382e;color:#a6e2c5;font-size:10px}
 .history-item-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
 .history-item-heading>strong{min-width:0;color:#dfe6f2;font-size:10px;font-weight:600;line-height:1.5;overflow-wrap:anywhere}
 .history-item-meta,.history-item-summary{display:block;margin-top:5px;color:#7f8ba0;font-size:9px;line-height:1.5}

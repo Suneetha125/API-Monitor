@@ -77,6 +77,9 @@ export default function App() {
   });
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
+  const [historyDeleteMessage, setHistoryDeleteMessage] = useState('');
+  const [historyDeleteError, setHistoryDeleteError] = useState('');
+  const [deletingInvestigationId, setDeletingInvestigationId] = useState(null);
   const [selectedInvestigationId, setSelectedInvestigationId] = useState(null);
   const [selectedInvestigation, setSelectedInvestigation] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -106,6 +109,9 @@ export default function App() {
     });
     setHistoryLoading(false);
     setHistoryError('');
+    setHistoryDeleteMessage('');
+    setHistoryDeleteError('');
+    setDeletingInvestigationId(null);
     setSelectedInvestigationId(null);
     setSelectedInvestigation(null);
     setDetailLoading(false);
@@ -220,6 +226,49 @@ export default function App() {
       setApprovalHistoryError(approvalResult.reason.message || 'Approval states could not be loaded.');
     }
     setDetailLoading(false);
+  }
+
+  async function deleteInvestigation(item) {
+    if (!window.confirm(`Delete investigation #${item.id}? This also deletes its approval records.`)) return;
+    const requestUserId = authenticatedUserId;
+    setDeletingInvestigationId(item.id);
+    setHistoryDeleteMessage('');
+    setHistoryDeleteError('');
+    try {
+      await api(`/api/agent/investigations/${item.id}`, { method: 'DELETE' });
+      if (activeUserId.current !== requestUserId) return;
+
+      setInvestigationHistory((current) => current.filter(({ id }) => id !== item.id));
+      setInvestigationPagination((current) => ({
+        ...current,
+        total: Math.max(0, current.total - 1)
+      }));
+      setApprovals((current) => current.filter(({ investigationId }) => investigationId !== item.id));
+      if (selectedInvestigationId === item.id) {
+        setSelectedInvestigationId(null);
+        setSelectedInvestigation(null);
+        setDetailLoading(false);
+        setDetailError('');
+        setApprovalHistoryError('');
+      }
+      if (investigation?.investigationId === item.id) setInvestigation(null);
+      setHistoryDeleteMessage(`Investigation #${item.id} deleted.`);
+
+      const targetPage = investigationHistory.length === 1 && investigationPage > 1
+        ? investigationPage - 1
+        : investigationPage;
+      if (targetPage !== investigationPage) {
+        setInvestigationPage(targetPage);
+      } else {
+        await loadInvestigationHistory(targetPage);
+      }
+    } catch (err) {
+      if (activeUserId.current === requestUserId) {
+        setHistoryDeleteError(err.message || 'The investigation could not be deleted.');
+      }
+    } finally {
+      if (activeUserId.current === requestUserId) setDeletingInvestigationId(null);
+    }
   }
 
   const visibleEndpoints = useMemo(() => {
@@ -442,6 +491,12 @@ export default function App() {
               <AlertTriangle size={15} />{historyError}
               <button type="button" className="history-retry" onClick={() => loadInvestigationHistory(investigationPagination.page)}>Retry</button>
             </div>}
+            {historyDeleteError && <div className="approval-error history-error" role="alert">
+              <AlertTriangle size={15} />{historyDeleteError}
+            </div>}
+            {historyDeleteMessage && <div className="history-success" role="status">
+              <Check size={14} />{historyDeleteMessage}
+            </div>}
             {historyLoading && !investigationHistory.length && <div className="history-loading"><LoaderCircle className="spin" size={17} /> Loading investigations...</div>}
             {!historyLoading && !historyError && !investigationHistory.length && <EmptyState
               icon={<MessageSquareText size={20} />}
@@ -455,20 +510,33 @@ export default function App() {
                     (approval) => approval.investigationId === item.id && approval.status === 'pending'
                   );
                   const status = investigationStatus(item.status, pendingApproval);
-                  return <button
-                    type="button"
-                    className={`investigation-history-item ${selectedInvestigationId === item.id ? 'selected' : ''}`}
-                    key={item.id}
-                    onClick={() => loadInvestigationDetail(item.id)}
-                    aria-current={selectedInvestigationId === item.id ? 'true' : undefined}
-                  >
-                    <span className="history-item-heading">
-                      <strong>#{item.id} · {item.question}</strong>
-                      <span className={`approval-status ${status.tone}`}>{status.label}</span>
-                    </span>
-                    <span className="history-item-meta">{prettyDate(item.created_at)}</span>
-                    <span className="history-item-summary">{item.safe_summary || 'No tool-call summary available.'}</span>
-                  </button>;
+                  return <div className="investigation-history-row" key={item.id}>
+                    <button
+                      type="button"
+                      className={`investigation-history-item ${selectedInvestigationId === item.id ? 'selected' : ''}`}
+                      onClick={() => loadInvestigationDetail(item.id)}
+                      aria-current={selectedInvestigationId === item.id ? 'true' : undefined}
+                    >
+                      <span className="history-item-heading">
+                        <strong>#{item.id} · {item.question}</strong>
+                        <span className={`approval-status ${status.tone}`}>{status.label}</span>
+                      </span>
+                      <span className="history-item-meta">{prettyDate(item.created_at)}</span>
+                      <span className="history-item-summary">{item.safe_summary || 'No tool-call summary available.'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="history-delete-button"
+                      title={`Delete investigation #${item.id}`}
+                      aria-label={`Delete investigation #${item.id}`}
+                      disabled={deletingInvestigationId !== null}
+                      onClick={() => deleteInvestigation(item)}
+                    >
+                      {deletingInvestigationId === item.id
+                        ? <LoaderCircle className="spin" size={14} />
+                        : <Trash2 size={14} />}
+                    </button>
+                  </div>;
                 })}
               </div>
               <div className="history-pagination">

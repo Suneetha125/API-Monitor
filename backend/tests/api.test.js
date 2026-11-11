@@ -94,6 +94,10 @@ describe('PulseCheck API', () => {
       .post('/api/agent/approvals/not-a-real-id/approve')
       .set('x-test-user-id', 'anonymous')
       .expect(401);
+    await request(app)
+      .delete('/api/agent/investigations/1')
+      .set('x-test-user-id', 'anonymous')
+      .expect(401);
   });
 
   it('returns HTTP 200 from the health endpoint', async () => {
@@ -339,6 +343,81 @@ describe('PulseCheck API', () => {
     await request(aliceApp)
       .get(`/api/agent/investigations/${created.body.investigationId}`)
       .expect(200);
+  });
+
+  it('deletes an owned investigation and cascades its approval records', async () => {
+    const { approval, response } = await createPendingApproval(
+      'run_simulation',
+      { key: 'normal' }
+    );
+    const investigationId = response.body.investigationId;
+    const ownerApp = createTestApp({
+      db,
+      provider: createMockInvestigationProvider({ content: 'Keep this investigation.' }),
+      testDefaultUserId: 'test-user'
+    });
+    const remaining = await request(ownerApp)
+      .post('/api/agent/investigate')
+      .send({ question: 'Keep this history entry?' })
+      .expect(200);
+
+    expect(await db.get(
+      'SELECT approval_id FROM agent_approvals WHERE approval_id = ?',
+      approval.id
+    )).toBeDefined();
+
+    await request(app)
+      .delete(`/api/agent/investigations/${investigationId}`)
+      .expect(204);
+
+    expect(await db.get(
+      'SELECT id FROM investigations WHERE id = ?',
+      investigationId
+    )).toBeUndefined();
+    expect(await db.get(
+      'SELECT approval_id FROM agent_approvals WHERE approval_id = ?',
+      approval.id
+    )).toBeUndefined();
+    const history = await request(app)
+      .get('/api/agent/investigations')
+      .expect(200);
+    expect(history.body.investigations.map(({ id }) => id)).toContain(remaining.body.investigationId);
+    expect(history.body.investigations.map(({ id }) => id)).not.toContain(investigationId);
+  });
+
+  it('returns not found when deleting a nonexistent investigation', async () => {
+    await request(app)
+      .delete('/api/agent/investigations/999999')
+      .expect(404)
+      .expect({
+        success: false,
+        error: 'Investigation not found.'
+      });
+  });
+
+  it('does not allow a user to delete another user investigation', async () => {
+    const ownerApp = createTestApp({
+      db,
+      provider: createMockInvestigationProvider({ content: 'Owned result.' }),
+      testDefaultUserId: 'clerk-user-owner'
+    });
+    const created = await request(ownerApp)
+      .post('/api/agent/investigate')
+      .send({ question: 'Owned investigation?' })
+      .expect(200);
+    const otherUserApp = createTestApp({
+      db,
+      testDefaultUserId: 'clerk-user-other'
+    });
+
+    await request(otherUserApp)
+      .delete(`/api/agent/investigations/${created.body.investigationId}`)
+      .expect(404);
+    expect(await db.get(
+      'SELECT id FROM investigations WHERE id = ? AND owner_id = ?',
+      created.body.investigationId,
+      'clerk-user-owner'
+    )).toBeDefined();
   });
 
   it('hides legacy ownerless investigations from authenticated users', async () => {
