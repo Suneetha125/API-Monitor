@@ -5,10 +5,12 @@ PulseCheck is a full-stack API monitoring application for managing endpoints, ru
 **Live Demo:** [https://pulsecheck-staging.onrender.com](https://pulsecheck-staging.onrender.com)
 
 ## Screenshots
+<img width="931" height="434" alt="image" src="https://github.com/user-attachments/assets/6667c5f0-5dce-4a77-b927-b576d857e7a4" />
+<img width="949" height="447" alt="image" src="https://github.com/user-attachments/assets/0fc5c293-5647-4566-842c-ee9ec210f774" />
+<img width="949" height="460" alt="image" src="https://github.com/user-attachments/assets/a177233e-e80b-4757-acae-85521acff4c2" />
 
-![PulseCheck Dashboard](docs/screenshots/dashboard.png)
 
-![PulseCheck Simulation Lab](docs/screenshots/simulation-lab.png)
+
 
 ## Features
 
