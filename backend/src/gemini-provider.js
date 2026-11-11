@@ -4,52 +4,77 @@ import { LlmRequestError, MissingApiKeyError } from './openai-provider.js';
 export const GEMINI_OPENAI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/';
 const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
 
-function collectMessageText(value, text = []) {
-  if (typeof value === 'string') {
-    text.push(value);
-  } else if (Array.isArray(value)) {
-    value.forEach((item) => collectMessageText(item, text));
-  } else if (value && typeof value === 'object') {
-    Object.values(value).forEach((item) => collectMessageText(item, text));
-  }
-  return text;
+const SAFE_ERROR_CODES = new Set([
+  'ABORTED',
+  'ALREADY_EXISTS',
+  'CANCELLED',
+  'DATA_LOSS',
+  'DEADLINE_EXCEEDED',
+  'FAILED_PRECONDITION',
+  'INTERNAL',
+  'INVALID_ARGUMENT',
+  'NOT_FOUND',
+  'OUT_OF_RANGE',
+  'PERMISSION_DENIED',
+  'RESOURCE_EXHAUSTED',
+  'UNAUTHENTICATED',
+  'UNAVAILABLE',
+  'UNKNOWN',
+  'insufficient_quota',
+  'invalid_api_key',
+  'model_not_found',
+  'rate_limit_exceeded'
+]);
+
+const SAFE_FIELD_PATH_PATTERN = /^tools\[\d{1,3}\]\.function\.(?:name|description|parameters(?:\.(?:type|properties|required|additionalProperties)(?:\.(?:endpointId|from|to|limit|key)(?:\.(?:type|minimum|maximum|pattern|enum))?)?)?)$/;
+
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function collectSensitiveValues(apiKey, messages) {
-  const messageValues = Array.isArray(messages)
-    ? messages.filter((message) => message?.role !== 'system')
-      .flatMap((message) => collectMessageText(message))
-    : [];
-  const values = [apiKey, ...messageValues]
-    .filter((text) => typeof text === 'string' && text.length > 0);
-  for (const text of messageValues) {
-    values.push(...(text.match(/[\p{L}\p{N}_@.+-]{4,}/gu) ?? []));
-  }
-  return [...new Set(values)].sort((left, right) => right.length - left.length);
-}
+function parseErrorPayload(value) {
+  if (isRecord(value)) return value;
+  if (typeof value !== 'string') return undefined;
 
-function safeDiagnosticIdentifier(value, sensitiveValues) {
-  if (typeof value !== 'string' || !/^[A-Za-z0-9_.-]{1,100}$/.test(value) ||
-      sensitiveValues.some((sensitiveValue) => value.includes(sensitiveValue))) {
+  const jsonStart = value.indexOf('{');
+  const jsonEnd = value.lastIndexOf('}');
+  if (jsonStart < 0 || jsonEnd <= jsonStart) return undefined;
+
+  try {
+    const parsed = JSON.parse(value.slice(jsonStart, jsonEnd + 1));
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
     return undefined;
   }
-  return value;
 }
 
-function sanitizeErrorMessage(value, sensitiveValues) {
-  if (typeof value !== 'string') return 'Upstream request failed.';
+function getErrorDetails(error) {
+  const parsedMessage = parseErrorPayload(error?.message);
+  const responseBody = parseErrorPayload(error?.error) ?? parsedMessage;
+  const body = isRecord(responseBody?.error) ? responseBody.error : responseBody;
+  return body;
+}
 
-  let message = value;
-  for (const sensitiveValue of sensitiveValues) {
-    message = message.split(sensitiveValue).join('[REDACTED]');
-  }
+function extractFieldPaths(body) {
+  const details = Array.isArray(body?.details) ? body.details : [];
+  const violations = [
+    ...(Array.isArray(body?.fieldViolations) ? body.fieldViolations : []),
+    ...(Array.isArray(body?.field_violations) ? body.field_violations : []),
+    ...details.flatMap((detail) => (
+      isRecord(detail)
+        ? [
+          ...(Array.isArray(detail.fieldViolations) ? detail.fieldViolations : []),
+          ...(Array.isArray(detail.field_violations) ? detail.field_violations : [])
+        ]
+        : []
+    ))
+  ];
 
-  return message
-    .replace(/\b(authorization|x-goog-api-key|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|secret)\b\s*[:=]\s*(?:(?:bearer|basic)\s+)?(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1=[REDACTED]')
-    .replace(/\b(?:bearer|basic)\s+[A-Za-z0-9._~+/-]+=*/gi, '[REDACTED_AUTH]')
-    .replace(/https?:\/\/[^\s"'<>]+/gi, '[REDACTED_URL]')
-    .replace(/(?:\{[\s\S]*\}|\[[\s\S]*\])/g, '[UPSTREAM_RESPONSE_OMITTED]')
-    .slice(0, 500);
+  return violations
+    .filter((violation) => isRecord(violation))
+    .slice(0, 10)
+    .map((violation) => violation.field)
+    .filter((field) => typeof field === 'string' && SAFE_FIELD_PATH_PATTERN.test(field));
 }
 
 export function createGeminiProvider({
@@ -87,12 +112,15 @@ export function createGeminiProvider({
         return message;
       } catch (error) {
         const status = Number(error?.status ?? error?.statusCode);
-        const sensitiveValues = collectSensitiveValues(key, messages);
+        const body = getErrorDetails(error);
+        const code = [error?.code, body?.status]
+          .find((candidate) => typeof candidate === 'string' && SAFE_ERROR_CODES.has(candidate));
+        const fieldPaths = extractFieldPaths(body);
         const diagnostic = {
           status: Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined,
-          code: safeDiagnosticIdentifier(error?.code, sensitiveValues),
-          type: safeDiagnosticIdentifier(error?.type ?? error?.name, sensitiveValues),
-          message: sanitizeErrorMessage(error?.message, sensitiveValues)
+          ...(code ? { code } : {}),
+          type: 'upstream_error',
+          ...(fieldPaths.length ? { fieldPaths: [...new Set(fieldPaths)] } : {})
         };
         console.error('Gemini upstream request failed.', diagnostic);
         throw new LlmRequestError();

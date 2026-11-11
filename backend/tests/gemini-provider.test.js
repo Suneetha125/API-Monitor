@@ -212,7 +212,11 @@ describe('Gemini OpenAI-compatible provider', () => {
       OpenAIClient: FailingOpenAI
     });
 
-    const messages = [{ role: 'user', content: `contact ${privateUserData}` }];
+    const messages = [
+      { role: 'system', content: 'private system prompt content' },
+      { role: 'user', content: `contact ${privateUserData}` },
+      { role: 'assistant', tool_calls: [{ function: { arguments: 'private-tool-argument' } }] }
+    ];
     await expect(provider.complete({ messages, tools: [] }))
       .rejects.toBeInstanceOf(LlmRequestError);
     await expect(provider.complete({ messages, tools: [] }))
@@ -223,15 +227,95 @@ describe('Gemini OpenAI-compatible provider', () => {
     expect(diagnostics).toMatchObject({
       status: 429,
       code: 'insufficient_quota',
-      type: 'api_error'
+      type: 'upstream_error'
     });
-    expect(diagnostics.message).toHaveLength(500);
+    expect(diagnostics).not.toHaveProperty('message');
+    expect(diagnostics).not.toHaveProperty('upstreamMessage');
     const serializedLog = JSON.stringify(errorLog.mock.calls);
     expect(serializedLog).not.toContain(apiKey);
     expect(serializedLog).not.toContain(authorizationCredential);
     expect(serializedLog).not.toContain(privateUserData);
+    expect(serializedLog).not.toContain('private system prompt content');
+    expect(serializedLog).not.toContain('private-tool-argument');
     expect(serializedLog).not.toContain('Authorization: Bearer');
     expect(serializedLog).not.toContain('private response body');
+  });
+
+  it('keeps only safe metadata from Gemini 400 diagnostics', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const apiKey = 'gemini-test-key-do-not-log';
+    const systemPrompt = 'PRIVATE-SYSTEM-PROMPT-71';
+    const userMessage = 'PRIVATE-USER-MESSAGE-82';
+    const toolArgument = 'PRIVATE-TOOL-ARGUMENT-93';
+    const authorizationValue = 'PRIVATE-AUTHORIZATION-04';
+    class FailingOpenAI {
+      constructor() {
+        this.chat = {
+          completions: {
+            create: async () => {
+              const error = new Error(
+                `400 response leaked ${systemPrompt} ${userMessage} ${toolArgument} ${apiKey} ${authorizationValue}`
+              );
+              error.status = 400;
+              error.code = `PRIVATE-${userMessage}`;
+              error.name = `PRIVATE-${systemPrompt}`;
+              error.type = `PRIVATE-${toolArgument}`;
+              error.error = {
+                error: {
+                  status: 'INVALID_ARGUMENT',
+                  message: `Sensitive response ${systemPrompt} ${userMessage} ${toolArgument} ${apiKey} ${authorizationValue}`,
+                  details: [{
+                    fieldViolations: [{
+                      field: 'tools[0].function.parameters.additionalProperties',
+                      description: `Sensitive description ${systemPrompt} ${userMessage} ${toolArgument} ${apiKey} Bearer ${authorizationValue}`
+                    }, {
+                      field: `tools[0].function.parameters.properties.${userMessage}.type`,
+                      description: 'Untrusted field path.'
+                    }]
+                  }]
+                }
+              };
+              throw error;
+            }
+          }
+        };
+      }
+    }
+
+    const provider = createGeminiProvider({
+      apiKey,
+      OpenAIClient: FailingOpenAI
+    });
+    await expect(provider.complete({
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userMessage },
+        { role: 'assistant', tool_calls: [{ function: { arguments: toolArgument } }] }
+      ],
+      tools: [{ type: 'function', function: { parameters: { description: toolArgument } } }]
+    })).rejects.toBeInstanceOf(LlmRequestError);
+
+    const [logMessage, diagnostics] = errorLog.mock.calls[0];
+    expect(logMessage).toBe('Gemini upstream request failed.');
+    expect(diagnostics).toMatchObject({
+      status: 400,
+      code: 'INVALID_ARGUMENT',
+      type: 'upstream_error',
+      fieldPaths: ['tools[0].function.parameters.additionalProperties']
+    });
+    const serializedDiagnostics = JSON.stringify(diagnostics);
+    expect(diagnostics).not.toHaveProperty('message');
+    expect(diagnostics).not.toHaveProperty('upstreamMessage');
+    expect(serializedDiagnostics).not.toContain(apiKey);
+    expect(serializedDiagnostics).not.toContain(systemPrompt);
+    expect(serializedDiagnostics).not.toContain(userMessage);
+    expect(serializedDiagnostics).not.toContain(toolArgument);
+    expect(serializedDiagnostics).not.toContain(authorizationValue);
+    expect(serializedDiagnostics).not.toContain('Bearer');
+    expect(serializedDiagnostics).not.toContain('Sensitive description');
+    expect(serializedDiagnostics).not.toContain('Sensitive response');
+    expect(serializedDiagnostics).not.toContain('Untrusted field path.');
+    expect(diagnostics.type).toBe('upstream_error');
   });
 
   it('keeps the investigation response generic for Gemini upstream failures', async () => {
@@ -269,8 +353,14 @@ describe('Gemini OpenAI-compatible provider', () => {
       expect(JSON.stringify(errorLog.mock.calls)).not.toContain('Gemini private response body');
       expect(errorLog).toHaveBeenCalledWith(
         'Gemini upstream request failed.',
-        expect.objectContaining({ status: 401, code: 'invalid_api_key' })
+        expect.objectContaining({
+          status: 401,
+          code: 'invalid_api_key',
+          type: 'upstream_error'
+        })
       );
+      expect(errorLog.mock.calls[0][1]).not.toHaveProperty('message');
+      expect(errorLog.mock.calls[0][1]).not.toHaveProperty('upstreamMessage');
     } finally {
       db.close();
     }
