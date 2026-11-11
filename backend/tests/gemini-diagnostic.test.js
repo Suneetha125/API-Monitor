@@ -5,7 +5,11 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadDiagnosticEnvironment, runGeminiDiagnostics } from '../scripts/gemini-diagnostic.js';
+import {
+  loadDiagnosticEnvironment,
+  runGeminiDiagnostics,
+  runGeminiToolCallRoundTrip
+} from '../scripts/gemini-diagnostic.js';
 import { GEMINI_OPENAI_BASE_URL } from '../src/gemini-provider.js';
 
 const SECRET = 'diagnostic-test-secret-key';
@@ -117,6 +121,130 @@ describe('Gemini integration diagnostic', () => {
     expect(requests[2].body.tool_choice).toBe('auto');
     expect(JSON.stringify(results)).not.toContain(SECRET);
     expect(JSON.stringify(results)).not.toContain(PRIVATE_CONTENT);
+  });
+
+  it('runs an opt-in tool-call round trip with matched tool result IDs', async () => {
+    const requests = [];
+    let responseIndex = 0;
+    const fetchImpl = async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      responseIndex += 1;
+      if (responseIndex === 1) {
+        return response(200, {
+          id: 'diagnostic-tool-call',
+          object: 'chat.completion',
+          created: 0,
+          model: 'gemini-diagnostic-model',
+          choices: [{
+            index: 0,
+            finish_reason: 'tool_calls',
+            message: {
+              role: 'assistant',
+              content: null,
+              tool_calls: [
+                { id: 'call-one', type: 'function', function: { name: 'get_service_health', arguments: '{}' } },
+                { id: 'call-two', type: 'function', function: { name: 'get_service_health', arguments: '{}' } }
+              ]
+            }
+          }]
+        });
+      }
+      return response(200, {
+        id: 'diagnostic-final',
+        object: 'chat.completion',
+        created: 0,
+        model: 'gemini-diagnostic-model',
+        choices: [{
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: PRIVATE_CONTENT }
+        }]
+      });
+    };
+
+    const results = await runGeminiToolCallRoundTrip({
+      env: validEnvironment,
+      OpenAIClient: createOpenAIWithFetch(),
+      fetchImpl
+    });
+
+    expect(results).toEqual([
+      { test: 'tool-call-initial', result: 'success', httpStatus: 200 },
+      { test: 'tool-call-follow-up', result: 'success', httpStatus: 200 }
+    ]);
+    expect(requests).toHaveLength(2);
+    expect(requests[0].tool_choice).toBe('auto');
+    expect(requests[0].messages[0].role).toBe('system');
+    expect(requests[0].tools).toHaveLength(6);
+    expect(requests[1].tools).toEqual(requests[0].tools);
+    expect(requests[1].tool_choice).toBe('auto');
+    expect(requests[1].messages.slice(-3)).toEqual([
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          { id: 'call-one', type: 'function', function: { name: 'get_service_health', arguments: '{}' } },
+          { id: 'call-two', type: 'function', function: { name: 'get_service_health', arguments: '{}' } }
+        ]
+      },
+      { role: 'tool', tool_call_id: 'call-one', content: '{"ok":true,"data":{"status":"diagnostic"}}' },
+      { role: 'tool', tool_call_id: 'call-two', content: '{"ok":true,"data":{"status":"diagnostic"}}' }
+    ]);
+    expect(JSON.stringify(results)).not.toContain(PRIVATE_CONTENT);
+    expect(JSON.stringify(results)).not.toContain(SECRET);
+  });
+
+  it('reports safe metadata when the real round-trip follow-up is rejected', async () => {
+    let requestNumber = 0;
+    const fetchImpl = async () => {
+      requestNumber += 1;
+      if (requestNumber === 1) {
+        return response(200, {
+          id: 'diagnostic-tool-call',
+          object: 'chat.completion',
+          created: 0,
+          model: 'gemini-diagnostic-model',
+          choices: [{
+            index: 0,
+            finish_reason: 'tool_calls',
+            message: {
+              role: 'assistant',
+              content: null,
+              tool_calls: [{
+                id: 'call-one',
+                type: 'function',
+                function: { name: 'get_service_health', arguments: '{}' }
+              }]
+            }
+          }]
+        });
+      }
+      return response(400, {
+        error: {
+          status: 'INVALID_ARGUMENT',
+          message: `${PRIVATE_CONTENT} Invalid JSON payload at tools[0].function.parameters.additionalProperties ${SECRET}`
+        }
+      });
+    };
+
+    const results = await runGeminiToolCallRoundTrip({
+      env: validEnvironment,
+      OpenAIClient: createOpenAIWithFetch(),
+      fetchImpl
+    });
+
+    expect(results).toEqual([
+      { test: 'tool-call-initial', result: 'success', httpStatus: 200 },
+      {
+        test: 'tool-call-follow-up',
+        result: 'failure',
+        httpStatus: 400,
+        errorCode: 'INVALID_ARGUMENT',
+        fieldPaths: ['tools[0].function.parameters.additionalProperties']
+      }
+    ]);
+    expect(JSON.stringify(results)).not.toContain(PRIVATE_CONTENT);
+    expect(JSON.stringify(results)).not.toContain(SECRET);
   });
 
   it('reports only allowlisted error metadata from an upstream 400', async () => {

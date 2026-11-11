@@ -252,6 +252,83 @@ describe('Gemini OpenAI-compatible provider', () => {
     expect(requests[1].tools).toEqual(requests[0].tools);
   });
 
+  it('serializes multiple function calls and matching results in the Gemini follow-up request', async () => {
+    const requests = [];
+    let responseIndex = 0;
+    const fetchMock = vi.fn(async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      responseIndex += 1;
+      return responseIndex === 1
+        ? mockCompletionResponse({
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'gemini-health-one',
+              type: 'function',
+              function: { name: 'get_service_health', arguments: '{}' }
+            },
+            {
+              id: 'gemini-health-two',
+              type: 'function',
+              function: { name: 'get_service_health', arguments: '{}' }
+            }
+          ]
+        })
+        : mockCompletionResponse({ role: 'assistant', content: 'Both health checks succeeded.' });
+    });
+    const provider = createHttpMockGeminiProvider(fetchMock);
+    const tools = {
+      definitions: [{
+        name: 'get_service_health',
+        description: 'Read service liveness.',
+        inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+        readOnly: true
+      }],
+      get_service_health: vi.fn(async () => ({ ok: true, data: { status: 'ok' } }))
+    };
+
+    await expect(createInvestigationAgent({ tools, provider }).investigate('Check health twice.'))
+      .resolves.toMatchObject({
+        answer: 'Both health checks succeeded.',
+        toolCalls: [
+          { name: 'get_service_health', success: true },
+          { name: 'get_service_health', success: true }
+        ]
+      });
+
+    expect(tools.get_service_health).toHaveBeenCalledTimes(2);
+    expect(requests).toHaveLength(2);
+    expect(requests[1].messages.slice(-3)).toEqual([
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: 'gemini-health-one',
+            type: 'function',
+            function: { name: 'get_service_health', arguments: '{}' }
+          },
+          {
+            id: 'gemini-health-two',
+            type: 'function',
+            function: { name: 'get_service_health', arguments: '{}' }
+          }
+        ]
+      },
+      {
+        role: 'tool',
+        tool_call_id: 'gemini-health-one',
+        content: '{"ok":true,"data":{"status":"ok"}}'
+      },
+      {
+        role: 'tool',
+        tool_call_id: 'gemini-health-two',
+        content: '{"ok":true,"data":{"status":"ok"}}'
+      }
+    ]);
+  });
+
   it('preserves Gemini function calls in the agent response format', async () => {
     const toolCall = {
       id: 'gemini-call-1',
@@ -455,7 +532,7 @@ describe('Gemini OpenAI-compatible provider', () => {
               error.error = {
                 error: {
                   status: 'INVALID_ARGUMENT',
-                  message: `Sensitive response ${systemPrompt} ${userMessage} ${toolArgument} ${apiKey} ${authorizationValue}`,
+                  message: `Invalid JSON payload received at 'tools[0].function.parameters.additionalProperties'; sensitive response ${systemPrompt} ${userMessage} ${toolArgument} ${apiKey} ${authorizationValue}`,
                   details: [{
                     fieldViolations: [{
                       field: 'tools[0].function.parameters.additionalProperties',
@@ -502,10 +579,10 @@ describe('Gemini OpenAI-compatible provider', () => {
       status: 400,
       code: 'INVALID_ARGUMENT',
       type: 'upstream_error',
+      message: 'The upstream rejected request validation.',
       fieldPaths: ['tools[0].function.parameters.additionalProperties']
     });
     const serializedDiagnostics = JSON.stringify(diagnostics);
-    expect(diagnostics).not.toHaveProperty('message');
     expect(diagnostics).not.toHaveProperty('upstreamMessage');
     expect(serializedDiagnostics).not.toContain(apiKey);
     expect(serializedDiagnostics).not.toContain(systemPrompt);
@@ -517,6 +594,48 @@ describe('Gemini OpenAI-compatible provider', () => {
     expect(serializedDiagnostics).not.toContain('Sensitive response');
     expect(serializedDiagnostics).not.toContain('Untrusted field path.');
     expect(diagnostics.type).toBe('upstream_error');
+  });
+
+  it('extracts a validated field path from an upstream message without logging the message', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const privateText = 'PRIVATE-UPSTREAM-DATA-202';
+    class FailingOpenAI {
+      constructor() {
+        this.chat = {
+          completions: {
+            create: async () => {
+              const error = new Error('Gemini request rejected.');
+              error.status = 400;
+              error.error = {
+                error: {
+                  status: 'INVALID_ARGUMENT',
+                  message: `Invalid JSON payload at 'tools[0].function.parameters.additionalProperties': ${privateText}`
+                }
+              };
+              throw error;
+            }
+          }
+        };
+      }
+    }
+
+    await expect(createGeminiProvider({
+      apiKey: 'private-test-api-key',
+      OpenAIClient: FailingOpenAI
+    }).complete({ messages: [], tools: [] })).rejects.toBeInstanceOf(LlmRequestError);
+
+    expect(errorLog).toHaveBeenCalledWith(
+      'Gemini upstream request failed.',
+      expect.objectContaining({
+        status: 400,
+        code: 'INVALID_ARGUMENT',
+        type: 'upstream_error',
+        message: 'The upstream rejected request validation.',
+        fieldPaths: ['tools[0].function.parameters.additionalProperties']
+      })
+    );
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(privateText);
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain('Invalid JSON payload');
   });
 
   it('keeps the investigation response generic for Gemini upstream failures', async () => {
@@ -560,7 +679,7 @@ describe('Gemini OpenAI-compatible provider', () => {
           type: 'upstream_error'
         })
       );
-      expect(errorLog.mock.calls[0][1]).not.toHaveProperty('message');
+      expect(errorLog.mock.calls[0][1].message).toBe('The upstream request failed.');
       expect(errorLog.mock.calls[0][1]).not.toHaveProperty('upstreamMessage');
     } finally {
       db.close();

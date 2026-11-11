@@ -143,6 +143,35 @@ describe('investigation agent loop', () => {
     expect(provider.complete.mock.calls[2][0].messages.at(-1).content).not.toContain('private.example');
   });
 
+  it('rejects missing or empty tool-call IDs before executing any tools', async () => {
+    for (const invalidCall of [
+      { type: 'function', function: { name: 'get_service_health', arguments: '{}' } },
+      { id: '', type: 'function', function: { name: 'get_service_health', arguments: '{}' } }
+    ]) {
+      const tools = createTools();
+      const provider = createProvider({ content: null, tool_calls: [invalidCall] });
+      await expect(createInvestigationAgent({ tools, provider }).investigate('Check health'))
+        .rejects.toBeInstanceOf(AgentProtocolError);
+      expect(tools.get_service_health).not.toHaveBeenCalled();
+    }
+  });
+
+  it('rejects non-string tool-call arguments before executing any tools', async () => {
+    const tools = createTools();
+    const provider = createProvider({
+      content: null,
+      tool_calls: [{
+        id: 'call-object-arguments',
+        type: 'function',
+        function: { name: 'get_service_health', arguments: {} }
+      }]
+    });
+
+    await expect(createInvestigationAgent({ tools, provider }).investigate('Check health'))
+      .rejects.toBeInstanceOf(AgentProtocolError);
+    expect(tools.get_service_health).not.toHaveBeenCalled();
+  });
+
   it('removes URL credentials and sensitive query parameters before calling the provider', async () => {
     const provider = createProvider({ content: 'Investigate the affected endpoint.' });
     const question = 'Authorization: Bearer bearer-secret; API   key = "api-secret"; password : "password-secret"; Check https://user:pass@example.com/health?keep=value&sig=abc&key=def&X-Amz-Signature=ghi#fragment';

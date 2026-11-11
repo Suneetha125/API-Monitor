@@ -70,11 +70,30 @@ function extractFieldPaths(body) {
     ))
   ];
 
-  return violations
+  const structuredPaths = violations
     .filter((violation) => isRecord(violation))
     .slice(0, 10)
     .map((violation) => violation.field)
     .filter((field) => typeof field === 'string' && SAFE_FIELD_PATH_PATTERN.test(field));
+  const messagePaths = typeof body?.message === 'string'
+    ? (body.message.match(/tools\[\d{1,3}\]\.function\.[A-Za-z0-9_.\[\]]{1,160}/g) ?? [])
+      .filter((field) => SAFE_FIELD_PATH_PATTERN.test(field))
+    : [];
+  return [...new Set([...structuredPaths, ...messagePaths])].slice(0, 10);
+}
+
+function getSafeErrorMessage(body) {
+  const message = typeof body?.message === 'string' ? body.message : '';
+  if (/\b(unknown name|cannot find field|invalid field)\b/i.test(message)) {
+    return 'The upstream rejected a request field.';
+  }
+  if (/\b(invalid json|invalid argument|invalid value|required field)\b/i.test(message)) {
+    return 'The upstream rejected request validation.';
+  }
+  if (/\b(tool|function).*\b(invalid|unsupported|not supported|rejected)\b/i.test(message)) {
+    return 'The upstream rejected a tool-calling request.';
+  }
+  return message ? 'The upstream request failed.' : undefined;
 }
 
 export function createGeminiProvider({
@@ -116,10 +135,12 @@ export function createGeminiProvider({
         const code = [error?.code, body?.status]
           .find((candidate) => typeof candidate === 'string' && SAFE_ERROR_CODES.has(candidate));
         const fieldPaths = extractFieldPaths(body);
+        const safeMessage = getSafeErrorMessage(body);
         const diagnostic = {
           status: Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined,
           ...(code ? { code } : {}),
           type: 'upstream_error',
+          ...(safeMessage ? { message: safeMessage.slice(0, 120) } : {}),
           ...(fieldPaths.length ? { fieldPaths: [...new Set(fieldPaths)] } : {})
         };
         console.error('Gemini upstream request failed.', diagnostic);

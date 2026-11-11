@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAgentTools } from '../src/agent-tools.js';
 import { GEMINI_OPENAI_BASE_URL } from '../src/gemini-provider.js';
+import { INVESTIGATION_SYSTEM_PROMPT } from '../src/investigation-prompt.js';
 
 const LOCAL_ENV_FILE = resolve(dirname(fileURLToPath(import.meta.url)), '../../.env');
 const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
@@ -63,12 +64,27 @@ function extractSafeErrorMetadata(payload) {
         : []
     ))
   ].slice(0, 20);
-  const fieldPaths = [...new Set(violations
+  const structuredFieldPaths = violations
     .filter(isRecord)
     .map((violation) => violation.field)
-    .filter((field) => typeof field === 'string' && SAFE_FIELD_PATH_PATTERN.test(field)))];
+    .filter((field) => typeof field === 'string' && SAFE_FIELD_PATH_PATTERN.test(field));
+  const messageFieldPaths = typeof body.message === 'string'
+    ? (body.message.match(/tools\[\d{1,3}\]\.function\.[A-Za-z0-9_.\[\]]{1,160}/g) ?? [])
+      .filter((field) => SAFE_FIELD_PATH_PATTERN.test(field))
+    : [];
+  const fieldPaths = [...new Set([...structuredFieldPaths, ...messageFieldPaths])];
 
   return { code, fieldPaths };
+}
+
+function diagnosticResult(test, status, metadata, succeeded) {
+  return {
+    test,
+    result: succeeded ? 'success' : 'failure',
+    httpStatus: status,
+    ...(metadata.code ? { errorCode: metadata.code } : {}),
+    ...(metadata.fieldPaths.length ? { fieldPaths: metadata.fieldPaths } : {})
+  };
 }
 
 function validateConfiguration(env) {
@@ -77,6 +93,133 @@ function validateConfiguration(env) {
       !env.GEMINI_API_KEY.trim()) {
     throw new Error('Set LLM_PROVIDER=gemini and GEMINI_API_KEY; GEMINI_MODEL is optional.');
   }
+}
+
+export async function runGeminiToolCallRoundTrip({
+  env = process.env,
+  OpenAIClient = OpenAI,
+  fetchImpl = globalThis.fetch
+} = {}) {
+  validateConfiguration(env);
+  const apiKey = env.GEMINI_API_KEY.trim();
+  const model = typeof env.GEMINI_MODEL === 'string' && env.GEMINI_MODEL.trim()
+    ? env.GEMINI_MODEL.trim()
+    : DEFAULT_GEMINI_MODEL;
+  const tool = createProductionReadOnlyTools();
+  const toolNames = new Set(tool.map(({ function: definition }) => definition.name));
+  const metadata = { code: undefined, fieldPaths: [] };
+  let status = null;
+  const observeResponse = async (...args) => {
+    const response = await fetchImpl(...args);
+    status = response.status;
+    if (!response.ok) {
+      try {
+        Object.assign(metadata, extractSafeErrorMetadata(await response.clone().json()));
+      } catch {
+        metadata.code = undefined;
+        metadata.fieldPaths = [];
+      }
+    }
+    return response;
+  };
+  const client = new OpenAIClient({
+    apiKey,
+    baseURL: GEMINI_OPENAI_BASE_URL,
+    fetch: observeResponse
+  });
+  const messages = [
+    { role: 'system', content: INVESTIGATION_SYSTEM_PROMPT },
+    { role: 'user', content: 'Check the generic service health using an available monitoring function.' }
+  ];
+
+  let assistantMessage;
+  try {
+    const completion = await client.chat.completions.create({
+      model,
+      messages,
+      tools: tool,
+      tool_choice: 'auto'
+    });
+    assistantMessage = completion?.choices?.[0]?.message;
+  } catch {
+    return [
+      diagnosticResult('tool-call-initial', status, metadata, false),
+      diagnosticResult('tool-call-follow-up', null, { fieldPaths: [] }, false)
+    ];
+  }
+
+  const calls = assistantMessage?.tool_calls;
+  const callIds = new Set();
+  const validCalls = Array.isArray(calls) && calls.length > 0 && calls.length <= 5 &&
+    calls.every((call) => {
+      const id = call?.id;
+      const fn = call?.function;
+      if (typeof id !== 'string' || !id || callIds.has(id) ||
+          !toolNames.has(fn?.name) || typeof fn.arguments !== 'string') {
+        return false;
+      }
+      try {
+        const args = JSON.parse(fn.arguments);
+        if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
+      } catch {
+        return false;
+      }
+      callIds.add(id);
+      return true;
+    });
+  const initialResult = diagnosticResult(
+    'tool-call-initial',
+    status,
+    { code: undefined, fieldPaths: [] },
+    validCalls && status !== null && status >= 200 && status < 300
+  );
+  if (!validCalls || status === null || status >= 300) {
+    return [initialResult, diagnosticResult('tool-call-follow-up', null, { fieldPaths: [] }, false)];
+  }
+
+  const followUpMessages = [
+    ...messages,
+    {
+      role: 'assistant',
+      content: typeof assistantMessage.content === 'string' ? assistantMessage.content : null,
+      tool_calls: calls.map(({ id, function: fn }) => ({
+        id,
+        type: 'function',
+        function: { name: fn.name, arguments: fn.arguments }
+      }))
+    },
+    ...calls.map(({ id }) => ({
+      role: 'tool',
+      tool_call_id: id,
+      content: JSON.stringify({ ok: true, data: { status: 'diagnostic' } })
+    }))
+  ];
+
+  metadata.code = undefined;
+  metadata.fieldPaths = [];
+  status = null;
+  try {
+    await client.chat.completions.create({
+      model,
+      messages: followUpMessages,
+      tools: tool,
+      tool_choice: 'auto'
+    });
+  } catch {
+    return [
+      initialResult,
+      diagnosticResult('tool-call-follow-up', status, metadata, false)
+    ];
+  }
+  return [
+    initialResult,
+    diagnosticResult(
+      'tool-call-follow-up',
+      status,
+      metadata,
+      status !== null && status >= 200 && status < 300
+    )
+  ];
 }
 
 export function loadDiagnosticEnvironment(envFile = LOCAL_ENV_FILE) {
@@ -191,6 +334,9 @@ async function main() {
   try {
     loadDiagnosticEnvironment();
     const results = await runGeminiDiagnostics();
+    if (process.argv.includes('--tool-call-round-trip')) {
+      results.push(...await runGeminiToolCallRoundTrip());
+    }
     for (const result of results) console.log(JSON.stringify(result));
     if (results.some(({ result }) => result !== 'success')) process.exitCode = 1;
   } catch {
