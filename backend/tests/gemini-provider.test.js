@@ -1,11 +1,40 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import OpenAI from 'openai';
 import { createConfiguredProvider } from '../src/app.js';
 import { createInvestigationAgent } from '../src/agent.js';
+import { createAgentTools } from '../src/agent-tools.js';
 import { createDatabase } from '../src/database.js';
 import { createGeminiProvider, GEMINI_OPENAI_BASE_URL } from '../src/gemini-provider.js';
 import { LlmRequestError, MissingApiKeyError } from '../src/openai-provider.js';
 import { createTestApp } from './test-app.js';
+
+function mockCompletionResponse(message) {
+  return new Response(JSON.stringify({
+    id: 'chatcmpl-mock',
+    object: 'chat.completion',
+    created: 0,
+    model: 'gemini-3.8-flash',
+    choices: [{ index: 0, message, finish_reason: message.tool_calls ? 'tool_calls' : 'stop' }]
+  }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' }
+  });
+}
+
+function createHttpMockGeminiProvider(fetchImplementation) {
+  class OpenAIWithMockFetch extends OpenAI {
+    constructor(options) {
+      super({ ...options, fetch: fetchImplementation, maxRetries: 0 });
+    }
+  }
+
+  return createGeminiProvider({
+    apiKey: 'mock-gemini-api-key',
+    model: 'gemini-3.8-flash',
+    OpenAIClient: OpenAIWithMockFetch
+  });
+}
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -58,6 +87,169 @@ describe('Gemini OpenAI-compatible provider', () => {
       tool_choice: 'auto'
     });
     expect(errorLog).not.toHaveBeenCalled();
+  });
+
+  it('sends a text-only request through the OpenAI SDK HTTP serializer', async () => {
+    const requests = [];
+    const fetchMock = vi.fn(async (url, init) => {
+      requests.push({
+        url: String(url),
+        method: init.method,
+        body: JSON.parse(init.body)
+      });
+      return mockCompletionResponse({ role: 'assistant', content: 'Mock text response.' });
+    });
+    const provider = createHttpMockGeminiProvider(fetchMock);
+    const messages = [
+      { role: 'system', content: 'Generic system instruction.' },
+      { role: 'user', content: 'Give a short generic response.' }
+    ];
+
+    await expect(provider.complete({ messages, tools: [] })).resolves.toMatchObject({
+      role: 'assistant',
+      content: 'Mock text response.'
+    });
+
+    expect(requests).toEqual([{
+      url: `${GEMINI_OPENAI_BASE_URL}chat/completions`,
+      method: 'POST',
+      body: {
+        model: 'gemini-3.8-flash',
+        messages,
+        tools: [],
+        tool_choice: 'auto'
+      }
+    }]);
+  });
+
+  it('sends one minimal read-only tool using the OpenAI-compatible function shape', async () => {
+    const requests = [];
+    const fetchMock = vi.fn(async (url, init) => {
+      requests.push(JSON.parse(init.body));
+      return mockCompletionResponse({ role: 'assistant', content: 'Mock tool-enabled response.' });
+    });
+    const provider = createHttpMockGeminiProvider(fetchMock);
+    const messages = [{ role: 'user', content: 'Check the generic service status.' }];
+    const tools = [{
+      type: 'function',
+      function: {
+        name: 'get_service_health',
+        description: 'Read service liveness.',
+        parameters: {
+          type: 'object',
+          properties: {},
+          additionalProperties: false
+        }
+      }
+    }];
+
+    await expect(provider.complete({ messages, tools })).resolves.toMatchObject({
+      role: 'assistant',
+      content: 'Mock tool-enabled response.'
+    });
+
+    expect(requests).toEqual([{
+      model: 'gemini-3.8-flash',
+      messages,
+      tools,
+      tool_choice: 'auto'
+    }]);
+  });
+
+  it('serializes the complete default read-only agent tool set', async () => {
+    const db = createDatabase(':memory:');
+    const requests = [];
+    const fetchMock = vi.fn(async (url, init) => {
+      requests.push(JSON.parse(init.body));
+      return mockCompletionResponse({ role: 'assistant', content: 'Mock investigation result.' });
+    });
+
+    try {
+      const tools = createAgentTools({ db, serverPort: 3001 });
+      const provider = createHttpMockGeminiProvider(fetchMock);
+      const agent = createInvestigationAgent({ tools, provider });
+      await expect(agent.investigate('Summarize service health.')).resolves.toMatchObject({
+        answer: 'Mock investigation result.',
+        complete: true
+      });
+
+      expect(requests).toHaveLength(1);
+      expect(requests[0].model).toBe('gemini-3.8-flash');
+      expect(requests[0].tool_choice).toBe('auto');
+      expect(requests[0]).not.toHaveProperty('stream');
+      expect(requests[0].tools).toEqual(tools.definitions
+        .filter((definition) => definition.readOnly)
+        .map((definition) => ({
+          type: 'function',
+          function: {
+            name: definition.name,
+            description: definition.description,
+            parameters: definition.inputSchema
+          }
+        })));
+      expect(requests[0].tools).toHaveLength(6);
+      expect(requests[0].tools.map(({ function: functionDefinition }) => functionDefinition.name))
+        .not.toContain('run_endpoint_check');
+      expect(requests[0].tools.map(({ function: functionDefinition }) => functionDefinition.name))
+        .not.toContain('run_simulation');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('serializes a tool-call response and tool result into a valid follow-up request', async () => {
+    const requests = [];
+    const responses = [
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{
+          id: 'mock-health-call',
+          type: 'function',
+          function: { name: 'get_service_health', arguments: '{}' }
+        }]
+      },
+      { role: 'assistant', content: 'The service is healthy.' }
+    ];
+    const fetchMock = vi.fn(async (url, init) => {
+      requests.push(JSON.parse(init.body));
+      return mockCompletionResponse(responses[requests.length - 1]);
+    });
+    const provider = createHttpMockGeminiProvider(fetchMock);
+    const tools = {
+      definitions: [{
+        name: 'get_service_health',
+        description: 'Read service liveness.',
+        inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+        readOnly: true
+      }],
+      get_service_health: vi.fn(async () => ({ ok: true, data: { status: 'ok' } }))
+    };
+    const agent = createInvestigationAgent({ tools, provider });
+
+    await expect(agent.investigate('Check generic service health.')).resolves.toMatchObject({
+      answer: 'The service is healthy.',
+      complete: true
+    });
+
+    expect(requests).toHaveLength(2);
+    expect(requests[1].messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'assistant',
+        tool_calls: [{
+          id: 'mock-health-call',
+          type: 'function',
+          function: { name: 'get_service_health', arguments: '{}' }
+        }]
+      }),
+      expect.objectContaining({
+        role: 'tool',
+        tool_call_id: 'mock-health-call',
+        content: JSON.stringify({ ok: true, data: { status: 'ok' } })
+      })
+    ]));
+    expect(requests[1].tool_choice).toBe('auto');
+    expect(requests[1].tools).toEqual(requests[0].tools);
   });
 
   it('preserves Gemini function calls in the agent response format', async () => {
@@ -271,6 +463,15 @@ describe('Gemini OpenAI-compatible provider', () => {
                     }, {
                       field: `tools[0].function.parameters.properties.${userMessage}.type`,
                       description: 'Untrusted field path.'
+                    }, {
+                      field: 'tools[0].function.name\n',
+                      description: 'Trailing line feed.'
+                    }, {
+                      field: 'tools[0].function.name\r',
+                      description: 'Trailing carriage return.'
+                    }, {
+                      field: 'tools[0].function.name\u2028',
+                      description: 'Trailing Unicode line separator.'
                     }]
                   }]
                 }

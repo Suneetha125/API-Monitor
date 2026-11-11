@@ -26,7 +26,7 @@ const SAFE_ERROR_CODES = new Set([
   'rate_limit_exceeded'
 ]);
 
-const SAFE_FIELD_PATH_PATTERN = /^tools\[\d{1,3}\]\.function\.(?:name|description|parameters(?:\.(?:type|properties|required|additionalProperties)(?:\.(?:endpointId|from|to|limit|key)(?:\.(?:type|minimum|maximum|pattern|enum))?)?)?)$/;
+const SAFE_FIELD_PATH_PATTERN = /^tools\[\d{1,3}\]\.function\.(?:name|description|parameters(?:\.(?:type|properties|required|additionalProperties)(?:\.(?:endpointId|from|to|limit|key)(?:\.(?:type|minimum|maximum|pattern|enum))?)?)?)(?![\s\S])/;
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
