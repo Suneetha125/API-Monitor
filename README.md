@@ -1,206 +1,247 @@
 # PulseCheck — API Reliability & Incident Simulator
 
-PulseCheck is a local developer dashboard for managing API monitors, executing on-demand HTTP health checks, and exploring controlled incident scenarios. Local development and tests use SQLite; production can use PostgreSQL through `DATABASE_URL`. Dashboard metrics are calculated from stored checks, not generated sample values.
+PulseCheck is a full-stack API monitoring dashboard for managing endpoints, running on-demand health checks, reviewing stored reliability metrics, and investigating failures with an evidence-based AI agent.
 
-## Live demo
-
-- [Open the PulseCheck dashboard](https://pulsecheck-5su5.onrender.com/)
-- [Check API health](https://pulsecheck-5su5.onrender.com/api/health)
-
-The demo runs on Render's Free service and may take a little longer to respond after periods of inactivity.
-
-### Screenshots
+## Project screenshots
 
 ![PulseCheck dashboard showing metrics, latency history, and monitored simulation endpoints](docs/screenshots/dashboard.png)
 
 ![PulseCheck incident summary, local simulation lab, and recent test runs](docs/screenshots/simulation-lab.png)
 
-## Requirements
+## Live Demo
 
-- Node.js 22.5 or newer (uses the built-in `node:sqlite` module)
+[Open PulseCheck](https://pulsecheck-5su5.onrender.com/)
+
+The demo is hosted on Render and may take longer to respond after periods of inactivity. The API health check is available at [https://pulsecheck-5su5.onrender.com/api/health](https://pulsecheck-5su5.onrender.com/api/health).
+
+## Key features
+
+- **Endpoint monitoring:** Add, edit, and delete monitored endpoints; run on-demand HTTP health checks and review their history.
+- **Stored dashboard metrics:** View request count, success rate, average latency, and failures calculated from persisted check results.
+- **Safe target validation:** Custom HTTP(S) monitor destinations must resolve to public addresses; DNS is checked and pinned for each request, and redirects are not followed.
+- **Local simulations:** Four seeded scenarios exercise healthy, slow, timeout, and HTTP 500 behavior against local simulation routes.
+- **AI investigations:** Ask questions about monitoring data using OpenAI or Gemini through the OpenAI-compatible chat-completions interface. The bounded agent can call read-only monitoring tools and returns its evidence and tool-call summary.
+- **Approval workflow:** Operational tools are disabled by default. When enabled by server policy, proposed operations require explicit approval before execution.
+- **Investigation history:** Review and delete your own saved investigations. History and approval access are scoped to the authenticated user.
+- **Authentication and authorization:** Clerk authenticates API requests; the backend derives identity from verified server-side authentication and applies ownership checks to investigation and approval records.
+
+## Tech stack
+
+| Area | Technologies |
+| --- | --- |
+| Frontend | React, Vite, Recharts, Clerk React |
+| Backend | Node.js, Express, Clerk Express |
+| Data | SQLite for local development and tests; PostgreSQL when `DATABASE_URL` is configured |
+| AI providers | OpenAI SDK with OpenAI or Gemini OpenAI-compatible endpoints |
+| Tests | Vitest, Supertest, and an in-memory PostgreSQL emulator |
+| Deployment configuration | Render Blueprint (`render.yaml`) |
+
+## Architecture
+
+The React dashboard calls the Express API through `/api`. In development, Vite proxies these requests to the local backend. In production, Express serves the built frontend. The backend validates and performs endpoint checks, stores results, and calculates metrics from stored data.
+
+For AI investigations, the API authenticates and rate-limits the request, constructs the agent with provider-neutral tool definitions, and calls the configured model. The agent validates tool names and arguments, executes allowed read-only tools, and sends sanitized tool results back to the model. Operational actions are not executed by the model loop: they are persisted as pending approvals and can only be executed through an authenticated approval request after server-side validation.
+
+Simulation endpoints use `simulation://` identifiers. The backend translates them into requests to its own local simulation routes; clients cannot use these routes as arbitrary proxy destinations. Monitoring data is shared across authenticated users, while investigation records and approvals are user-scoped.
+
+## Project structure
+
+```text
+.
+├── backend/
+│   ├── scripts/                 # Gemini integration diagnostic
+│   ├── src/
+│   │   ├── agent.js             # Bounded investigation and tool-call loop
+│   │   ├── agent-tools.js       # Tool schemas, policy gates, and handlers
+│   │   ├── app.js               # Express API routes and request handling
+│   │   ├── auth.js              # Clerk authentication integration
+│   │   ├── database.js          # SQLite and PostgreSQL adapters
+│   │   ├── gemini-provider.js   # Gemini OpenAI-compatible adapter
+│   │   ├── monitor.js           # HTTP health-check execution
+│   │   ├── openai-provider.js   # OpenAI adapter
+│   │   ├── security.js          # Input and public-target validation
+│   │   └── services.js          # Shared monitoring and simulation services
+│   └── tests/                   # Backend API, agent, and provider tests
+├── docs/
+│   └── screenshots/
+├── frontend/
+│   └── src/                     # React application and authenticated API client
+├── .env.example                 # Environment variable names; no credentials
+├── package.json                 # Root workspace scripts
+└── render.yaml                  # Render service configuration
+```
+
+## Local setup
+
+### Requirements
+
+- Node.js 22.5 or newer (the backend uses the built-in `node:sqlite` module)
 - npm 10 or newer
 
-`node:sqlite` is still marked experimental in some supported Node releases, so Node may print an experimental-feature warning at startup.
-
-## Setup and run
-
-From the project root:
+Install dependencies from the repository root:
 
 ```bash
 npm install
+```
+
+Configure Clerk credentials before starting the API:
+
+```text
+CLERK_SECRET_KEY=
+CLERK_PUBLISHABLE_KEY=
+VITE_CLERK_PUBLISHABLE_KEY=
+```
+
+The Clerk publishable key used by Vite must match the key configured for the backend. Set these values in your shell or a local, untracked environment file. Vite reads its environment files; the Node API does **not** load `.env` files automatically, so backend values must also be present in the API process environment. Never commit secrets.
+
+Start the frontend and API together:
+
+```bash
 npm run dev
 ```
 
-Authentication is required before starting the API. Configure Clerk's server secret and publishable keys, plus the same publishable key for Vite:
+Open the Vite URL printed in the terminal (normally `http://127.0.0.1:5173`) and sign in with Clerk. The API normally listens on `http://127.0.0.1:3001`.
 
-```text
-CLERK_SECRET_KEY=...
-CLERK_PUBLISHABLE_KEY=...
-VITE_CLERK_PUBLISHABLE_KEY=...
-```
-
-Set these in your local process environment or a local `.env` file for Vite. Node does not automatically load `.env` files, so the two `CLERK_*` values must also be present in the API process environment. Keep the secret key private; only the publishable key is used by the browser. `OPENAI_API_KEY` is needed to run AI investigations, but not to use the monitoring dashboard.
-
-Open the Vite URL printed in the terminal (normally `http://127.0.0.1:5173`) and sign in through Clerk. The API listens on `http://127.0.0.1:3001`; Vite proxies `/api` requests to it.
-
-For a production frontend build and API server:
+To build the frontend and start the API:
 
 ```bash
 npm run build
 npm start
 ```
 
-In production (`NODE_ENV=production`), the API server also serves the built frontend from `frontend/dist` and listens on all interfaces. Set `PORT` to change the API port. When `DATABASE_URL` is set, the server uses PostgreSQL; otherwise it uses SQLite at `DATABASE_PATH` (default `pulsecheck.sqlite`). Without production mode, the API binds to `127.0.0.1`; during development Vite serves the frontend and proxies `/api` to the API. The server refuses to start without `CLERK_SECRET_KEY` and `CLERK_PUBLISHABLE_KEY`; the frontend build requires `VITE_CLERK_PUBLISHABLE_KEY`.
+With `NODE_ENV=production`, the API serves the built frontend and listens on all interfaces. `PORT` controls the listening port. When `DATABASE_URL` is set, the backend uses PostgreSQL; otherwise, it uses SQLite at `DATABASE_PATH` (default: `pulsecheck.sqlite`). Production mode requires `DATABASE_URL` to avoid using ephemeral local storage.
 
-### Free Render + Neon deployment
+## Environment variables
 
-The root `render.yaml` defines a single Free Node web service that installs development dependencies for the Vite build (`npm ci --include=dev`), builds and serves the frontend through Express, and uses `/api/health` as its health check. Configure the `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`, and `VITE_CLERK_PUBLISHABLE_KEY` Render environment variables with the keys from your Clerk application. Configure `OPENAI_API_KEY` only when enabling investigations. For persistent production data, provide a Neon PostgreSQL connection URL through Render's `DATABASE_URL` environment variable. Do not commit any of these secrets. The server uses PostgreSQL when that variable is configured and SQLite for local development/tests. It refuses to start in production without `DATABASE_URL`.
+Copy `.env.example` as a reference and provide values through the appropriate local process environment or deployment secret settings. The example file contains names and defaults only; do not put real credentials in version control.
 
-Render Free web services have ephemeral local filesystems and can sleep when idle, so the local SQLite database is not used on the hosted service. Neon Free currently provides 1 GB/project and 100 CU-hours/project/month; it scales to zero after five minutes. Render's free service also has usage limits and cold starts. Review the [Render Free limits](https://render.com/docs/free) and [Neon Free plan](https://neon.com/docs/introduction/plans), keep both services on their Free plans, and do not attach a Render disk.
+| Variable | Purpose |
+| --- | --- |
+| `CLERK_SECRET_KEY` | Server-side Clerk authentication. Required to start the API. |
+| `CLERK_PUBLISHABLE_KEY` | Clerk application configuration used by the backend. Required to start the API. |
+| `VITE_CLERK_PUBLISHABLE_KEY` | Clerk publishable key embedded into the frontend build. |
+| `LLM_PROVIDER` | Selects `openai` (default) or `gemini`. |
+| `OPENAI_API_KEY` | Credential for the OpenAI provider. Set only when using OpenAI. |
+| `OPENAI_MODEL` | Optional OpenAI model; defaults to `gpt-4o-mini`. |
+| `GEMINI_API_KEY` | Credential for the Gemini OpenAI-compatible endpoint. Set only when using Gemini. |
+| `GEMINI_MODEL` | Optional Gemini model; defaults to `gemini-3.8-flash`. |
+| `DATABASE_URL` | PostgreSQL connection URL. Required in production; unset locally to use SQLite. |
+| `DATABASE_PATH` | Optional SQLite file path; defaults to `pulsecheck.sqlite`. |
+| `NODE_ENV` | Enables production serving and production database requirements when set to `production`. |
+| `PORT` | Optional HTTP listening port; defaults to `3001`. |
+| `AGENT_MAX_ITERATIONS` | Maximum model iterations per investigation; defaults to `5`, valid range `1`–`10`. |
+| `AGENT_MAX_TOOL_CALLS_PER_RESPONSE` | Maximum tool calls accepted per model response; defaults to `5`, valid range `1`–`20`. |
+| `AGENT_MAX_TOOL_EXECUTIONS` | Maximum tool executions per investigation; defaults to `10`, valid range `1`–`50`. |
+| `AGENT_ALLOW_OPERATIONAL_TOOLS` | Enables advertising approved operational tools when set to `true`; defaults to `false` and does not bypass approval. |
 
-## Architecture
+The investigation rate limit is currently five requests per authenticated user per 15-minute window. It is stored in the application database and fails closed if the rate-limit store is unavailable. API JSON bodies are limited to 16 KB, and investigation questions are limited to 2,000 characters.
 
-- `frontend/` — React single-page dashboard, Vite development server, and Recharts latency history.
-- `backend/src/app.js` — Express API routes, validation integration, and metric queries.
-- `backend/src/security.js` — endpoint input validation and public-address/DNS checks.
-- `backend/src/monitor.js` — timed HTTP requests and result normalization.
-- `backend/src/services.js` — shared monitoring, history, summary, and simulation operations used by both the HTTP API and agent tools.
-- `backend/src/agent-tools.js` — provider-neutral tool definitions and validated tool handlers.
-- `backend/src/agent.js` — bounded investigation loop, schema validation, tool dispatch, and execution policy.
-- `backend/src/openai-provider.js` — OpenAI SDK adapter behind the provider interface.
-- `backend/src/investigation-prompt.js` — system instructions for evidence-based investigations.
-- `backend/src/database.js` — local SQLite and production PostgreSQL adapters, schemas, indexes, and initial simulation endpoint records.
-- `backend/tests/` — Vitest and Supertest API integration tests.
+## Agent tools and safety
 
-The backend is bound to the IPv4 loopback interface by default. Simulation targets are represented by `simulation://` identifiers in the endpoint registry and are translated by the backend to its own loopback HTTP simulation routes. The mock routes are never arbitrary proxy destinations.
+The backend defines eight tools. Six are read-only: `get_service_health`, `list_monitors`, `get_check_history`, `get_monitoring_summary`, `get_recent_failures`, and `list_simulations`. The two operational tools, `run_endpoint_check` and `run_simulation`, remain disabled by default.
 
-## Agent tool layer
+The agent does not access the database directly or apply production fixes. Tool arguments are validated against their schemas; the tool layer does not accept arbitrary SQL or arbitrary URLs. Endpoint checks can only run against configured monitors. Sensitive-looking fields and monitor URLs are filtered from tool results sent to the model, and common credential patterns in questions are redacted; this is not a guarantee against every possible secret format. The configured model provider receives the remaining question and monitoring evidence.
 
-The backend exports eight provider-neutral tools from `backend/src/agent-tools.js`. Create a tool instance with the existing database adapter and the listening server port (needed for local simulation checks):
+If operational tools are enabled, a requested operation is stored as a pending approval with a 15-minute expiry. The server reloads and validates the stored operation when the authenticated owner approves it. Pending operations are not replayed automatically after restart.
 
-```js
-import { createAgentTools } from './src/agent-tools.js';
-import { createDatabase } from './src/database.js';
+## API endpoints
 
-const db = createDatabase();
-const tools = createAgentTools({ db, serverPort: 3001 });
-const result = await tools.get_service_health({});
-// { ok: true, data: { status: 'ok' } }
+All listed routes require Clerk authentication except `GET /api/health`, which is public for health checks. Investigation and approval routes enforce user ownership.
+
+| Method | Route | Description |
+| --- | --- | --- |
+| `GET` | `/api/health` | Public API liveness |
+| `GET` | `/api/simulations` | List built-in simulation scenarios |
+| `GET` | `/api/simulations/:key` | Execute a built-in local simulation |
+| `GET` | `/api/endpoints` | List monitors and stored per-monitor aggregates |
+| `POST` | `/api/endpoints` | Create a monitor |
+| `PUT` | `/api/endpoints/:id` | Edit a monitor |
+| `DELETE` | `/api/endpoints/:id` | Delete a monitor and its stored check history |
+| `POST` | `/api/endpoints/:id/check` | Run and persist one health check |
+| `GET` | `/api/checks` | List stored checks; supports `endpointId`, `from`, `to`, and `limit` filters |
+| `GET` | `/api/dashboard` | Return stored request count, success rate, average latency, and failure count |
+| `POST` | `/api/agent/investigate` | Run an AI investigation |
+| `GET` | `/api/agent/investigations` | List the authenticated user's paginated history |
+| `GET` | `/api/agent/investigations/:id` | Retrieve an owned investigation |
+| `DELETE` | `/api/agent/investigations/:id` | Delete an owned investigation and associated approvals |
+| `GET` | `/api/agent/investigations/:id/approvals` | List approval records for an owned investigation |
+| `POST` | `/api/agent/approvals/:approvalId/approve` | Approve and execute a permitted stored operation |
+| `POST` | `/api/agent/approvals/:approvalId/reject` | Reject a pending operation |
+
+Endpoint creation accepts a public HTTP(S) target:
+
+```json
+{ "name": "Checkout API", "url": "https://example.com/health" }
 ```
 
-Each handler accepts a JSON-compatible argument object and returns `{ ok: true, data }` or `{ ok: false, error: { code, message } }`. `tools.definitions` provides names, descriptions, JSON input schemas, and effect metadata. `get_service_health`, `list_monitors`, `get_check_history`, `get_monitoring_summary`, `get_recent_failures`, and `list_simulations` are read-only. `run_endpoint_check` performs and persists a check; `run_simulation` executes a built-in local scenario without persisting a check. Recent failures are filtered in the database query rather than fetched alongside successful runs.
+or a built-in simulation:
 
-Example:
-
-```js
-const history = await tools.get_check_history({
-  endpointId: 1,
-  from: '2026-11-01',
-  to: '2026-11-04',
-  limit: 50
-});
+```json
+{ "name": "Local healthy scenario", "url": "simulation://normal", "simulation": "normal" }
 ```
 
-The tool layer does not accept arbitrary SQL or URLs. A check can only target a monitor already in the database, and custom monitor URLs continue to use the existing public-address validation and DNS pinning. Tool handlers have no authentication of their own; keep them inside trusted server-side code and do not expose them directly to unauthenticated clients.
+Supported simulation keys are `normal`, `slow`, `timeout`, and `error`. Date filters use `YYYY-MM-DD`; `from` and `to` are inclusive UTC calendar days.
 
-## AI investigation agent
-
-The agent is a backend-only, bounded tool-calling loop. The OpenAI adapter sends the user's question, an investigation system prompt, and JSON-schema tool descriptions to the model. The backend validates requested names and arguments. Read-only handlers may run during the investigation; operational requests stop the loop and create a persisted pending approval instead of invoking a handler. The API executes the stored, validated operation only after an explicit approval request and a conditional pending-state claim. The agent does not access the database directly and does not apply production fixes.
-
-All client-facing `/api/*` routes require a Clerk-authenticated bearer token except `GET /api/health`, which remains public for deployment health checks. The server's own local simulation health-check requests use an unpredictable per-process token and do not expose an unauthenticated client route. The backend derives the user ID from Clerk's verified request context; owner IDs in request bodies or query parameters are ignored. Investigation history and approvals are scoped to that user, and one user's approval cannot be viewed or decided by another. Existing investigations that predate ownership remain ownerless and are hidden from all users; they are not automatically assigned to the first person who signs in.
-
-Authenticated users share the monitoring workspace and its endpoint/check data. Investigation requests are limited to 5 per authenticated user per 15-minute window. The limiter is stored in the application database, returns `429` with rate-limit headers when exceeded, and fails closed if its storage is unavailable. API JSON bodies are limited to 16 KB and investigation questions to 2,000 characters. Operational tools remain disabled by default (`AGENT_ALLOW_OPERATIONAL_TOOLS=false`); enabling them does not remove the explicit per-operation approval requirement.
-
-### Configure and run
-
-Copy `.env.example` to `.env` for reference, then set `LLM_PROVIDER` to `openai` (the default) or `gemini`. OpenAI uses `OPENAI_API_KEY` and optional `OPENAI_MODEL`; Gemini uses `GEMINI_API_KEY` and optional `GEMINI_MODEL` (defaults to `gemini-3.8-flash`). Configure only the selected provider's API key in the backend process environment or deployment secret settings. This project does not load `.env` files automatically. `AGENT_MAX_ITERATIONS` defaults to 5 and accepts values from 1 through 10. `AGENT_ALLOW_OPERATIONAL_TOOLS` defaults to `false`; when enabled it permits the approval endpoint to execute the two operational tools, but it does not replace explicit per-operation approval.
-
-Start the API with `npm run dev:api` (or `npm start` for production), then send a POST request:
+An investigation request uses:
 
 ```http
 POST /api/agent/investigate
 Content-Type: application/json
 
-{ "question": "Why is my API failing?" }
+{ "question": "Why did the latest API checks fail?" }
 ```
 
-Successful responses include the answer and tool-call names/statuses, without returning tool arguments or raw tool results:
+Successful responses include the answer and tool-call names/statuses, not raw tool arguments or raw tool results. Missing provider configuration returns a safe `503`; provider failures and malformed model responses return a generic `502`.
 
-```json
-{
-  "success": true,
-  "answer": "The latest stored checks show ...",
-  "toolCalls": [
-    { "name": "get_recent_failures", "success": true }
-  ],
-  "complete": true
-}
-```
+## Data model
 
-Requests without a configured key receive a safe `503` response; provider failures and malformed model responses receive a generic `502`. Questions are limited to 2,000 characters, tool arguments are schema-validated before dispatch, and the model iteration count is capped. By default, only read-only tools are advertised. Operational requests become pending approval records that expire after 15 minutes; the client submits only the approval ID, and the server reloads and validates the stored operation before execution. Pending approvals are never replayed automatically after restart. Approval records are listed with `GET /api/agent/investigations/:id/approvals`; explicit decisions use `POST /api/agent/approvals/:approvalId/approve` or `/reject`.
+- `endpoints` stores monitored targets.
+- `checks` stores individual results and cascades when an endpoint is deleted.
+- `investigations` stores findings and an optional owner ID derived from verified Clerk identity. Legacy ownerless investigations remain hidden.
+- `agent_approvals` stores validated pending operations, lifecycle status, and safe result metadata. Investigation deletion cascades to associated approvals.
+- `agent_rate_limits` stores one fixed-window counter per authenticated user.
+- `app_metadata` stores the PostgreSQL simulation-seed marker.
 
-Clerk verifies the user's identity; authorization is enforced separately by querying investigations and approvals with that verified user ID. Generic server errors avoid returning database/provider internals. Sensitive-looking fields and monitor URLs are omitted from tool results sent to the model, and common credential patterns in questions are redacted, but this is not a guarantee against every secret format. The model provider receives the remaining question and monitoring evidence; review your data-handling requirements before configuring an API key.
+SQLite enables foreign-key enforcement and WAL journaling. PostgreSQL uses matching tables and cascading foreign keys. Without `DATABASE_URL`, the local database file is created in the backend process working directory and is ignored by Git.
 
-## Simulations
+## Testing and build
 
-The database is initially seeded with four **simulation** endpoints (no health-check metrics are seeded):
-
-| Scenario | Local response |
-| --- | --- |
-| Healthy response | HTTP 200 JSON |
-| Slow response | HTTP 200 after approximately 700 ms |
-| Timeout | Delayed response; the health-check request times out after 2 seconds |
-| HTTP 500 | Deliberate HTTP 500 response |
-
-They are clearly labeled in the dashboard and use only the local API server. Custom HTTP(S) URLs are allowed only when their host resolves exclusively to public IP addresses. Private, loopback, link-local, and other non-public addresses are rejected, DNS is checked again before each check and pinned for the request, and redirects are not followed. URL credentials and query strings are rejected so query-based secrets are not returned by the endpoint API.
-
-## API routes
-
-| Method | Route | Description |
-| --- | --- | --- |
-| `GET` | `/api/health` | API liveness |
-| `GET` | `/api/simulations` | List built-in scenarios |
-| `GET` | `/api/endpoints` | List monitors with stored per-endpoint aggregates |
-| `POST` | `/api/endpoints` | Create a monitor |
-| `PUT` | `/api/endpoints/:id` | Edit a monitor |
-| `DELETE` | `/api/endpoints/:id` | Delete a monitor and its check history |
-| `POST` | `/api/endpoints/:id/check` | Execute and persist one health check |
-| `GET` | `/api/checks` | List individual runs; optional `endpointId`, `from`, `to`, `limit` filters |
-| `GET` | `/api/dashboard` | Stored request count, success rate, mean latency, and failure count; optional `endpointId`, `from`, `to` filters |
-| `POST` | `/api/agent/investigate` | Investigate an API reliability question using configured LLM tool calling |
-| `GET` | `/api/agent/investigations` | List the signed-in user's paginated investigation history |
-| `GET` | `/api/agent/investigations/:id` | Retrieve one investigation owned by the signed-in user |
-| `GET` | `/api/agent/investigations/:id/approvals` | List operations and approval states for an investigation |
-| `POST` | `/api/agent/approvals/:approvalId/approve` | Explicitly approve and execute a stored operation |
-| `POST` | `/api/agent/approvals/:approvalId/reject` | Reject a pending operation |
-
-Endpoint JSON uses `{ "name": "API name", "url": "https://example.com/health" }` for a public target, or `{ "name": "Local simulation", "url": "simulation://normal", "simulation": "normal" }` for a simulation. Supported simulation keys are `normal`, `slow`, `timeout`, and `error`. Dates use `YYYY-MM-DD`; `from` and `to` are inclusive calendar days in UTC.
-
-## Database schema
-
-- `endpoints`: `id`, `name`, `url`, nullable `simulation`, `created_at`.
-- `checks`: `id`, `endpoint_id` (foreign key with cascade delete), nullable `status_code`, `duration_ms`, `success`, nullable `error`, `checked_at`.
-- `agent_approvals`: unique approval ID, investigation foreign key, stored tool name and validated arguments, lifecycle status, creation/expiry/execution timestamps, and safe result metadata.
-- `investigations.owner_id`: nullable Clerk user ID used to scope investigation and approval access. Existing ownerless rows remain hidden.
-- `agent_approvals.decided_by`: verified Clerk user ID that approved or rejected the operation.
-- `agent_rate_limits`: one fixed-window request counter per authenticated user for AI investigation requests.
-- `app_metadata`: PostgreSQL seed marker so an intentionally emptied endpoint list is not reseeded after service restarts.
-- Indexes support endpoint/date history queries. SQLite local databases enable foreign-key enforcement and WAL journaling; the production PostgreSQL database uses matching tables and cascading foreign keys.
-
-Without `DATABASE_URL`, the default local database file is `pulsecheck.sqlite` in the backend process working directory. It is ignored by Git. Production mode requires `DATABASE_URL` and fails fast rather than silently using ephemeral SQLite storage.
-
-## Tests
+Run the backend test suite from the repository root:
 
 ```bash
 npm test
 ```
 
-The integration tests use isolated temporary SQLite files and an in-memory PostgreSQL emulator, plus local simulation endpoints; they do not require internet access. They cover API health, authenticated route access, investigation ownership and approval isolation, ownerless legacy records, rate limiting, endpoint creation/retrieval and validation, success and HTTP 500 checks, timeout responsiveness, check persistence/history, exact success-rate and average-latency calculations, endpoint CRUD, and date filtering. The PostgreSQL adapter is exercised for ownership and rate-limit behavior as well. There is no incident state or incident-resolution feature; failed checks are displayed as recent incidents, so consecutive-failure lifecycle tests do not apply.
+The tests use isolated temporary SQLite databases, an in-memory PostgreSQL emulator, and local simulation endpoints. They do not require live LLM requests.
 
-## Known limitations
+Build the frontend:
 
-- Checks run on demand; there is no scheduler or alert delivery. Authenticated users share monitoring data, while investigation records and approvals are user-scoped.
-- One fixed 2-second timeout is used for every health check; request method and headers are fixed to a safe GET.
-- The public-target guard blocks non-public DNS answers and pins the checked address, but outbound monitoring still requires internet/DNS access.
-- Check history is retained until its endpoint is deleted; there is no retention policy or pagination beyond the `limit` parameter.
-- The public health endpoint intentionally does not require authentication; client-facing API routes otherwise require Clerk authentication.
+```bash
+npm run build
+```
+
+The backend workspace also includes an opt-in Gemini integration diagnostic. It makes real provider requests when run with Gemini configured; it is separate from the mocked test suite:
+
+```bash
+npm run diagnose:gemini --workspace backend
+```
+
+Add `-- --tool-call-round-trip` to test an initial tool request and its follow-up separately. Diagnostic output is limited to test names, HTTP results, and allowlisted error metadata. Do not pass credentials on the command line; configure them through the environment or the root local `.env` file used by the diagnostic.
+
+## Deployment
+
+The root `render.yaml` defines a Render Node web service that builds the frontend and serves it through Express. Configure the Clerk variables and PostgreSQL `DATABASE_URL` in the deployment environment. Configure only the API key for the selected LLM provider when enabling investigations. Render and database plans may have quotas, cold starts, or ephemeral storage; production persistence requires PostgreSQL rather than a local SQLite file.
+
+## Known limitations and future improvements
+
+- Health checks run on demand; there is no scheduler or alert delivery.
+- A fixed two-second timeout and safe GET request are used for health checks.
+- Check history has no retention policy and is not paginated beyond the `limit` filter.
+- Authenticated users share endpoint and check data; investigation records and approvals are private to their owner.
+- The public health endpoint intentionally does not require authentication; other client-facing API routes require Clerk authentication.
+
+Possible future work includes scheduled checks, alert delivery, configurable retention, and additional monitoring visualizations.
+
+## Repository
+
+Source code: [Suneetha125/API-Monitor](https://github.com/Suneetha125/API-Monitor).
