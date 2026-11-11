@@ -1,8 +1,11 @@
 import OpenAI from 'openai';
+import { existsSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAgentTools } from '../src/agent-tools.js';
 import { GEMINI_OPENAI_BASE_URL } from '../src/gemini-provider.js';
 
+const LOCAL_ENV_FILE = resolve(dirname(fileURLToPath(import.meta.url)), '../../.env');
 const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
 const SAFE_ERROR_CODES = new Set([
   'ABORTED',
@@ -74,6 +77,10 @@ function validateConfiguration(env) {
       !env.GEMINI_API_KEY.trim()) {
     throw new Error('Set LLM_PROVIDER=gemini and GEMINI_API_KEY; GEMINI_MODEL is optional.');
   }
+}
+
+export function loadDiagnosticEnvironment(envFile = LOCAL_ENV_FILE) {
+  if (existsSync(envFile)) process.loadEnvFile(envFile);
 }
 
 function createProductionReadOnlyTools() {
@@ -182,6 +189,7 @@ export async function runGeminiDiagnostics({
 
 async function main() {
   try {
+    loadDiagnosticEnvironment();
     const results = await runGeminiDiagnostics();
     for (const result of results) console.log(JSON.stringify(result));
     if (results.some(({ result }) => result !== 'success')) process.exitCode = 1;

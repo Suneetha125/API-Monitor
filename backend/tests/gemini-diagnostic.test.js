@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import OpenAI from 'openai';
-import { runGeminiDiagnostics } from '../scripts/gemini-diagnostic.js';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { loadDiagnosticEnvironment, runGeminiDiagnostics } from '../scripts/gemini-diagnostic.js';
 import { GEMINI_OPENAI_BASE_URL } from '../src/gemini-provider.js';
 
 const SECRET = 'diagnostic-test-secret-key';
@@ -28,6 +33,44 @@ const validEnvironment = {
 };
 
 describe('Gemini integration diagnostic', () => {
+  it('loads environment variables from an existing env file without printing values', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'pulsecheck-env-test-'));
+    const envFile = join(directory, '.env');
+    const variableName = 'PULSECHECK_DIAGNOSTIC_ENV_TEST';
+    const previousValue = process.env[variableName];
+    writeFileSync(envFile, `${variableName}=loaded-from-file\n`);
+
+    try {
+      delete process.env[variableName];
+      loadDiagnosticEnvironment(envFile);
+      expect(process.env[variableName]).toBe('loaded-from-file');
+    } finally {
+      if (previousValue === undefined) delete process.env[variableName];
+      else process.env[variableName] = previousValue;
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('runs its CLI entry point and reports missing configuration without making requests', () => {
+    const scriptPath = fileURLToPath(new URL('../scripts/gemini-diagnostic.js', import.meta.url));
+    const result = spawnSync(process.execPath, [scriptPath], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        LLM_PROVIDER: '',
+        GEMINI_API_KEY: ''
+      }
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      'Gemini diagnostic not run. Set LLM_PROVIDER=gemini and GEMINI_API_KEY; GEMINI_MODEL is optional.'
+    );
+    expect(result.stdout).toBe('');
+    expect(result.stderr).not.toContain(SECRET);
+  });
+
   it('sends three independent requests with production-compatible request shapes', async () => {
     const requests = [];
     const fetchImpl = async (url, init) => {
